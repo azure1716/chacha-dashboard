@@ -1,0 +1,2 @@
+entry_time,exit_time,signal,direction,strike,type,lots,entry,exit,sl,target,atr_used,option_delta,confidence,iv_percentile_at_entry,gross_pnl,cost,net_pnl,exit_reason,used_ltp_fallback_entry,used_ltp_fallback_exit
+22:08:23,22:08:23,BUY CALL,CALL,24400.0,CE,4,120.5,128.0,126.01672221968579,127.94983334094265,3.1040972253927714,0.5,87.33800841514727,70.0,1950.0,121.891604,1828.108396,TARGET,False,False

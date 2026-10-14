@@ -1,0 +1,2 @@
+timestamp,spot,signal,confidence,reason,technical_score,trend,trend_strength,adx,momentum_score,option_score,option_bias,htf_trend,atr_pct,epm_score,epm_bias
+2026-10-14 22:08:23,24385.041176693976,BUY CALL,87.34,Bullish multi-factor confirmation,80,BULLISH,STRONG,74.49606472276183,100,29.537166900420758,BULLISH,BULLISH,0.025459027958169,47.0,CALL
