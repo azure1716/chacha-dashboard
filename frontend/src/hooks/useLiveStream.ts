@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { LiveStateSnapshot } from '../types';
+import { apiUrl, wsUrl as getWsUrl } from '../api';
 
 export type ConnectionMode = 'CONNECTED' | 'RECONNECTING' | 'DISCONNECTED' | 'FALLBACK_POLLING';
 
@@ -17,7 +18,7 @@ export function useLiveStream() {
   // Fallback REST polling
   const pollRestState = useCallback(async () => {
     try {
-      const res = await fetch('/api/live/state');
+      const res = await fetch(apiUrl('/api/live/state'));
       if (res.ok) {
         const data: LiveStateSnapshot = await res.json();
         if (isComponentMounted.current) {
@@ -49,10 +50,7 @@ export function useLiveStream() {
   const connectWebSocket = useCallback(() => {
     if (!isComponentMounted.current) return;
 
-    // Determine WS URL
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/ws/live`;
+    const wsUrl = getWsUrl('/ws/live');
 
     try {
       const ws = new WebSocket(wsUrl);

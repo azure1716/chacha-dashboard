@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { SystemConfig } from '../types';
 import { Settings, Shield, Terminal, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Play, Loader2, Bug, Key, ExternalLink } from 'lucide-react';
+import { apiUrl } from '../api';
 
 interface SystemConfigPageProps {
   onOpenTokenModal?: () => void;
@@ -15,7 +16,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ onOpenTokenM
 
   const fetchTokenStatus = async () => {
     try {
-      const res = await fetch('/api/config/token-status');
+      const res = await fetch(apiUrl('/api/config/token-status'));
       if (res.ok) {
         const data = await res.json();
         setTokenStatus(data);
@@ -29,7 +30,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ onOpenTokenM
     setLoading(true);
     try {
       fetchTokenStatus();
-      const res = await fetch('/api/config');
+      const res = await fetch(apiUrl('/api/config'));
       if (res.ok) {
         const data = await res.json();
         setConfig(data);
@@ -48,7 +49,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ onOpenTokenM
   const handleRunSelfTests = async () => {
     setRunningTests(true);
     try {
-      const res = await fetch('/api/tests/run', { method: 'POST' });
+      const res = await fetch(apiUrl('/api/tests/run'), { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         setTestResult(data);

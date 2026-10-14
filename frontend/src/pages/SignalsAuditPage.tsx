@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { SignalLogRow } from '../types';
 import { Filter, RefreshCw, ArrowUpRight, ArrowDownRight, PauseCircle, Search, HelpCircle, Eye } from 'lucide-react';
+import { apiUrl } from '../api';
 
 export const SignalsAuditPage: React.FC = () => {
   const [signals, setSignals] = useState<SignalLogRow[]>([]);
@@ -20,7 +21,7 @@ export const SignalsAuditPage: React.FC = () => {
       });
       if (signalFilter !== 'ALL') query.set('signal', signalFilter);
 
-      const res = await fetch(`/api/signals?${query.toString()}`);
+      const res = await fetch(apiUrl(`/api/signals?${query.toString()}`));
       if (res.ok) {
         const data = await res.json();
         setSignals(data.items || []);

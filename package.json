@@ -1,0 +1,10 @@
+{
+  "name": "chacha-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NIFTY Options Algo paper-trading dashboard and research platform",
+  "scripts": {
+    "vercel-build": "cd frontend && npm install && npm run build",
+    "build": "cd frontend && npm install && npm run build"
+  }
+}

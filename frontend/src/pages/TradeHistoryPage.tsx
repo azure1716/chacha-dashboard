@@ -3,6 +3,7 @@ import { PaperPosition, TradeStatsSummary, TradeLogRow } from '../types';
 import { OpenPositionCard } from '../components/OpenPositionCard';
 import { EquityCurveChart } from '../components/EquityCurveChart';
 import { Download, Filter, RefreshCw, ArrowUpRight, ArrowDownRight, Award, TrendingUp, TrendingDown, DollarSign } from 'lucide-react';
+import { apiUrl } from '../api';
 
 interface TradeHistoryPageProps {
   currentPosition: PaperPosition | null;
@@ -20,7 +21,7 @@ export const TradeHistoryPage: React.FC<TradeHistoryPageProps> = ({ currentPosit
 
   const fetchStats = useCallback(async () => {
     try {
-      const res = await fetch('/api/trades/stats');
+      const res = await fetch(apiUrl('/api/trades/stats'));
       if (res.ok) {
         const data: TradeStatsSummary = await res.json();
         setStats(data);
@@ -40,7 +41,7 @@ export const TradeHistoryPage: React.FC<TradeHistoryPageProps> = ({ currentPosit
       if (exitReasonFilter !== 'ALL') query.set('exit_reason', exitReasonFilter);
       if (directionFilter !== 'ALL') query.set('direction', directionFilter);
 
-      const res = await fetch(`/api/trades?${query.toString()}`);
+      const res = await fetch(apiUrl(`/api/trades?${query.toString()}`));
       if (res.ok) {
         const data = await res.json();
         setTrades(data.items || []);
@@ -63,7 +64,7 @@ export const TradeHistoryPage: React.FC<TradeHistoryPageProps> = ({ currentPosit
   }, [fetchTrades]);
 
   const handleExport = () => {
-    window.location.href = '/api/trades/export';
+    window.location.href = apiUrl('/api/trades/export');
   };
 
   return (

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { SweepJobResult } from '../types';
 import { Heatmap2D } from '../components/Heatmap2D';
 import { SlidersHorizontal, Play, AlertOctagon, Loader2, ArrowUpDown, Info } from 'lucide-react';
+import { apiUrl } from '../api';
 
 export const ParameterSweepPage: React.FC = () => {
   const [datasets, setDatasets] = useState<any[]>([]);
@@ -15,7 +16,7 @@ export const ParameterSweepPage: React.FC = () => {
   const [viewMode, setViewMode] = useState<'top' | 'all' | 'bottom'>('top');
 
   useEffect(() => {
-    fetch('/api/backtest/datasets')
+    fetch(apiUrl('/api/backtest/datasets'))
       .then(res => res.json())
       .then(data => setDatasets(data))
       .catch(console.error);
@@ -26,7 +27,7 @@ export const ParameterSweepPage: React.FC = () => {
 
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/sweep/jobs/${activeJobId}`);
+        const res = await fetch(apiUrl(`/api/sweep/jobs/${activeJobId}`));
         if (res.ok) {
           const job = await res.json();
           setJobProgress(job.progress || 'Computing...');
@@ -54,7 +55,7 @@ export const ParameterSweepPage: React.FC = () => {
     setJobProgress('Initializing sweep grid...');
 
     try {
-      const res = await fetch('/api/sweep/run', {
+      const res = await fetch(apiUrl('/api/sweep/run'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

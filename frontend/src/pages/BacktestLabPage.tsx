@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { BacktestJobResult } from '../types';
 import { EquityCurveChart } from '../components/EquityCurveChart';
 import { FlaskConical, Play, Upload, AlertTriangle, ShieldCheck, CheckCircle2, Loader2, Info } from 'lucide-react';
+import { apiUrl } from '../api';
 
 interface DatasetItem {
   id: string;
@@ -30,7 +31,7 @@ export const BacktestLabPage: React.FC = () => {
   // Fetch available datasets
   const fetchDatasets = async () => {
     try {
-      const res = await fetch('/api/backtest/datasets');
+      const res = await fetch(apiUrl('/api/backtest/datasets'));
       if (res.ok) {
         const data = await res.json();
         setDatasets(data);
@@ -50,7 +51,7 @@ export const BacktestLabPage: React.FC = () => {
 
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/backtest/jobs/${activeJobId}`);
+        const res = await fetch(apiUrl(`/api/backtest/jobs/${activeJobId}`));
         if (res.ok) {
           const job = await res.json();
           setJobStatus(job.status);
@@ -78,7 +79,7 @@ export const BacktestLabPage: React.FC = () => {
     setResult(null);
 
     try {
-      const res = await fetch('/api/backtest/run', {
+      const res = await fetch(apiUrl('/api/backtest/run'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -114,7 +115,7 @@ export const BacktestLabPage: React.FC = () => {
     formData.append('file', file);
 
     try {
-      const res = await fetch('/api/backtest/upload', {
+      const res = await fetch(apiUrl('/api/backtest/upload'), {
         method: 'POST',
         body: formData,
       });

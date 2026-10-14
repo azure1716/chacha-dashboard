@@ -11,6 +11,7 @@ import {
   ShieldCheck, 
   HelpCircle 
 } from 'lucide-react';
+import { apiUrl } from '../api';
 
 interface TokenModalProps {
   isOpen: boolean;
@@ -37,7 +38,7 @@ export const TokenModal: React.FC<TokenModalProps> = ({ isOpen, onClose, onToken
 
   const fetchStatus = async () => {
     try {
-      const res = await fetch('/api/config/token-status');
+      const res = await fetch(apiUrl('/api/config/token-status'));
       if (res.ok) {
         const data = await res.json();
         setCurrentStatus(data);
@@ -61,7 +62,7 @@ export const TokenModal: React.FC<TokenModalProps> = ({ isOpen, onClose, onToken
     setStatusMessage(null);
 
     try {
-      const res = await fetch('/api/config/test-token', {
+      const res = await fetch(apiUrl('/api/config/test-token'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: trimmed }),
@@ -102,7 +103,7 @@ export const TokenModal: React.FC<TokenModalProps> = ({ isOpen, onClose, onToken
     setStatusMessage(null);
 
     try {
-      const res = await fetch('/api/config/token', {
+      const res = await fetch(apiUrl('/api/config/token'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: trimmed, force }),
