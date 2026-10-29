@@ -117,20 +117,44 @@ export const CandleChart: React.FC<CandleChartProps> = ({ candles, spotPrice }) 
   useEffect(() => {
     if (!candleSeriesRef.current || !ema20SeriesRef.current || !ema50SeriesRef.current || candles.length === 0) return;
 
+    // Helper to normalize any time input into Unix epoch seconds (number)
+    const toSeconds = (val: any): number => {
+      if (typeof val === 'number') {
+        if (val > 1e11) return Math.floor(val / 1000); // ms to sec
+        if (val < 1e8) return Math.floor(val * 60);    // epoch min to sec
+        return Math.floor(val);
+      }
+      if (typeof val === 'string') {
+        const ms = Date.parse(val);
+        if (!isNaN(ms)) return Math.floor(ms / 1000);
+        const num = Number(val);
+        if (!isNaN(num)) return toSeconds(num);
+      }
+      return 0;
+    };
+
     // Format and sort candles by time ascending
     const formattedCandles: CandlestickData<Time>[] = [];
     const formattedEma20: LineData<Time>[] = [];
     const formattedEma50: LineData<Time>[] = [];
 
-    // Deduplicate and ensure ascending timestamps
-    const sorted = [...candles].sort((a, b) => a.time - b.time);
+    // Map each candle with normalized epoch seconds
+    const normalized = candles
+      .map(c => ({
+        ...c,
+        secTime: toSeconds(c.time),
+      }))
+      .filter(c => c.secTime > 0);
+
+    // Deduplicate and ensure strictly ascending timestamps for lightweight-charts
+    normalized.sort((a, b) => a.secTime - b.secTime);
     const seenTimes = new Set<number>();
 
-    for (const c of sorted) {
-      if (seenTimes.has(c.time)) continue;
-      seenTimes.add(c.time);
+    for (const c of normalized) {
+      if (seenTimes.has(c.secTime)) continue;
+      seenTimes.add(c.secTime);
 
-      const timeVal = c.time as Time;
+      const timeVal = c.secTime as Time;
       formattedCandles.push({
         time: timeVal,
         open: c.open,
@@ -148,10 +172,12 @@ export const CandleChart: React.FC<CandleChartProps> = ({ candles, spotPrice }) 
     }
 
     try {
-      candleSeriesRef.current.setData(formattedCandles);
-      ema20SeriesRef.current.setData(formattedEma20);
-      ema50SeriesRef.current.setData(formattedEma50);
-      chartRef.current?.timeScale().fitContent();
+      if (formattedCandles.length > 0) {
+        candleSeriesRef.current.setData(formattedCandles);
+        ema20SeriesRef.current.setData(formattedEma20);
+        ema50SeriesRef.current.setData(formattedEma50);
+        chartRef.current?.timeScale().fitContent();
+      }
     } catch (e) {
       console.warn("Chart data update skipped due to formatting:", e);
     }

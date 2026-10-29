@@ -464,6 +464,36 @@ def candle_minute_from_timestamp(value):
         return None
 
 
+def candle_epoch_seconds(value):
+    """
+    Converts any timestamp format (ISO string, epoch ms, epoch sec, or epoch minute)
+    into standard Unix epoch seconds (integer) for lightweight-charts.
+    """
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            x = float(value)
+            if x > 10000000000:
+                return int(x / 1000)
+            if x < 100000000:
+                return int(x * 60)
+            return int(x)
+        s = str(value).strip()
+        if "T" in s:
+            from datetime import datetime
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return int(dt.timestamp())
+        x = float(s)
+        if x > 10000000000:
+            return int(x / 1000)
+        if x < 100000000:
+            return int(x * 60)
+        return int(x)
+    except Exception:
+        return None
+
+
 def refresh_today_intraday_history():
     global historical_last_minute, historical_candle_count, history_loaded
     safe_print("\nRefreshing CURRENT-DAY 1-minute candles...")
@@ -1617,15 +1647,17 @@ def get_state_snapshot():
             "unrealized_net_pnl": round(net_pnl, 2),
         }
 
-    # Format candles for lightweight-charts
+    # Format candles for lightweight-charts (guarantee unix seconds)
     candles_list = []
+    base_fallback_time = int(time.time() - len(closes_copy) * 60)
     for idx in range(len(closes_copy)):
         sub_c = closes_copy[: idx + 1]
         e20 = core.calculate_ema(sub_c, EMA_FAST)
         e50 = core.calculate_ema(sub_c, EMA_SLOW)
-        t_val = times_copy[idx] if idx < len(times_copy) else int(time.time() - (len(closes_copy) - idx) * 60)
+        t_raw = times_copy[idx] if idx < len(times_copy) else (base_fallback_time + idx * 60)
+        t_sec = candle_epoch_seconds(t_raw) or (base_fallback_time + idx * 60)
         candles_list.append({
-            "time": t_val,
+            "time": t_sec,
             "open": round(opens_copy[idx], 2) if idx < len(opens_copy) else round(closes_copy[idx], 2),
             "high": round(highs_copy[idx], 2) if idx < len(highs_copy) else round(closes_copy[idx], 2),
             "low": round(lows_copy[idx], 2) if idx < len(lows_copy) else round(closes_copy[idx], 2),
