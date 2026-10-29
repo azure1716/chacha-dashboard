@@ -1044,6 +1044,7 @@ def live_signal_ready():
 
 
 def generate_signal(spot=None):
+    global last_signal_audit
     ready, readiness_reason = live_signal_ready()
     if not ready:
         tech = compute_technical()
@@ -1059,6 +1060,11 @@ def generate_signal(spot=None):
             "signal": "WAIT", "confidence": 0.0, "reason": readiness_reason,
             "technical": tech, "momentum": mom,
             "options": opts, "htf_trend": htf,
+            "epm": epm,
+        }
+        last_signal_audit = {
+            "signal": result["signal"], "confidence": 0.0,
+            "reason": result.get("reason", ""), "timestamp": time.strftime("%H:%M:%S"),
             "epm": epm,
         }
         log_signal_to_csv(result, spot)
@@ -1080,6 +1086,11 @@ def generate_signal(spot=None):
             "technical": technical, "momentum": momentum, "options": options, "htf_trend": htf_trend,
             "epm": epm,
         }
+        last_signal_audit = {
+            "signal": result["signal"], "confidence": 0.0,
+            "reason": result.get("reason", ""), "timestamp": time.strftime("%H:%M:%S"),
+            "epm": epm,
+        }
         log_signal_to_csv(result, spot)
         return result
 
@@ -1089,6 +1100,11 @@ def generate_signal(spot=None):
             "signal": "WAIT", "confidence": 0.0,
             "reason": f"Low volatility filter (ATR {atr_pct:.4f}% of spot < {ATR_PCT_MIN}%)",
             "technical": technical, "momentum": momentum, "options": options, "htf_trend": htf_trend,
+            "epm": epm,
+        }
+        last_signal_audit = {
+            "signal": result["signal"], "confidence": 0.0,
+            "reason": result.get("reason", ""), "timestamp": time.strftime("%H:%M:%S"),
             "epm": epm,
         }
         log_signal_to_csv(result, spot)
@@ -1110,7 +1126,6 @@ def generate_signal(spot=None):
         "epm": epm,
     })
 
-    global last_signal_audit
     last_signal_audit = {
         "signal": result["signal"], "confidence": result.get("confidence", 0.0),
         "reason": result.get("reason", ""), "timestamp": time.strftime("%H:%M:%S"),
@@ -1561,9 +1576,23 @@ def get_state_snapshot():
         underlying_trend_score=technical.get("score", 0.0),
     )
 
-    signal_name = last_sig.get("signal") or "WAIT"
-    confidence = last_sig.get("confidence", 0.0)
-    reason = last_sig.get("reason") or ("Waiting for engine tick" if spot > 0 else "No spot price")
+    if last_sig:
+        signal_name = last_sig.get("signal") or "WAIT"
+        confidence = last_sig.get("confidence", 0.0)
+        reason = last_sig.get("reason") or ("Waiting for engine tick" if spot > 0 else "No spot price")
+    else:
+        live_dec = core.signal_decision(
+            technical, momentum, options,
+            min_direction_score=MIN_DIRECTION_SCORE,
+            confidence_threshold=CONFIDENCE_THRESHOLD,
+            min_adx_for_trend_signal=MIN_ADX_FOR_TREND_SIGNAL,
+            require_htf_agreement=REQUIRE_HTF_AGREEMENT,
+            htf_trend=htf,
+            epm=epm,
+        )
+        signal_name = live_dec.get("signal", "WAIT")
+        confidence = live_dec.get("confidence", 0.0)
+        reason = live_dec.get("reason") or ("Waiting for engine tick" if spot > 0 else "No spot price")
 
     # If open paper trade exists, calculate live unrealized P&L
     open_position = None
