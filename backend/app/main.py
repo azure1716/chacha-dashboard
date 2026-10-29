@@ -18,12 +18,29 @@ from backend.app.api.live import router as ws_router
 import nifty_algo_live as live
 
 
+import threading
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Enforce paper trading safety invariant on startup
     if getattr(live, "REAL_ORDER", False):
         raise RuntimeError("FATAL: REAL_ORDER is True. Refusing to run live orders in paper dashboard build.")
+
+    # Auto-start live engine in background thread if a valid Upstox token exists on server boot
+    token = (getattr(live, "ACCESS_TOKEN", "") or os.environ.get("UPSTOX_ACCESS_TOKEN", "")).strip()
+    if token and len(token) > 8 and token not in ("PASTE_YOUR_ACCESS_TOKEN_HERE", "token"):
+        threading.Thread(
+            target=live.start_live_engine,
+            kwargs={"token": token},
+            daemon=True,
+            name="LiveEngineInit",
+        ).start()
+
     yield
+
+    # Clean shutdown
+    live.stop_live_engine()
 
 
 app = FastAPI(

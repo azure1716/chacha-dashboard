@@ -332,8 +332,15 @@ def integer(value, default=0):
         return default
 
 
+def get_ist_now():
+    """Returns current datetime in Indian Standard Time (UTC+5:30) regardless of host system timezone."""
+    import datetime
+    ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    return datetime.datetime.now(ist_tz)
+
+
 def today_string():
-    return time.strftime("%Y-%m-%d")
+    return get_ist_now().strftime("%Y-%m-%d")
 
 
 def timestamp_minute(ts=None):
@@ -344,10 +351,10 @@ def timestamp_minute(ts=None):
 
 def nse_market_open_now():
     try:
-        lt = time.localtime()
-        if lt.tm_wday >= 5:
+        now_ist = get_ist_now()
+        if now_ist.weekday() >= 5:
             return False
-        minutes = lt.tm_hour * 60 + lt.tm_min
+        minutes = now_ist.hour * 60 + now_ist.minute
         return 9 * 60 + 15 <= minutes < 15 * 60 + 30
     except Exception:
         return False
@@ -355,10 +362,10 @@ def nse_market_open_now():
 
 def is_trade_time():
     try:
-        lt = time.localtime()
-        if lt.tm_wday >= 5:
+        now_ist = get_ist_now()
+        if now_ist.weekday() >= 5:
             return False
-        minutes = lt.tm_hour * 60 + lt.tm_min
+        minutes = now_ist.hour * 60 + now_ist.minute
         return TRADE_START_MINUTES <= minutes <= TRADE_END_MINUTES
     except Exception:
         return False
@@ -517,8 +524,10 @@ def refresh_today_intraday_history():
 def load_historical_data():
     global history_loaded, historical_last_minute, historical_candle_count
     safe_print("\nLoading historical NIFTY 1-minute candles...")
-    to_date = today_string()
-    from_date = time.strftime("%Y-%m-%d", time.localtime(time.time() - HISTORY_DAYS * 86400))
+    import datetime
+    now_ist = get_ist_now()
+    to_date = now_ist.strftime("%Y-%m-%d")
+    from_date = (now_ist - datetime.timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
     url = ("https://api.upstox.com/v3/historical-candle/" + NIFTY_KEY.replace("|", "%7C") +
            "/minutes/" + str(HISTORY_INTERVAL) + "/" + to_date + "/" + from_date)
     try:
@@ -819,16 +828,73 @@ def websocket_connect_worker():
     ws_connect_attempts += 1
     safe_print("WS CONNECT THREAD STARTED | ATTEMPT:", ws_connect_attempts)
     try:
-        streamer.connect()
-        safe_print("WS CONNECT CALL RETURNED")
+        if streamer is not None:
+            streamer.connect()
+            safe_print("WS CONNECT CALL RETURNED")
     except Exception as e:
         ws_last_error = str(e)
         log_exception("WS CONNECT THREAD ERROR", e)
 
 
+def update_options_quotes_rest():
+    """Fetches quotes for selected option strikes via REST when WebSocket is inactive or in fallback."""
+    global selected_strikes
+    if not selected_strikes:
+        return
+    keys = [s["key"] for s in selected_strikes if s.get("key")]
+    if not keys:
+        return
+    url = "https://api.upstox.com/v3/market-quote/quotes"
+    try:
+        chunk = ",".join(keys[:100])
+        r = requests.get(url, headers=HEADERS, params={"instrument_key": chunk}, timeout=8)
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            for key, quote in data.items():
+                if not isinstance(quote, dict):
+                    continue
+                norm_key = key.replace(":", "|")
+                with data_lock:
+                    old = live_data.get(norm_key, {}).copy()
+                    ltp = num(quote.get("last_price", quote.get("ltp")))
+                    if ltp > 0:
+                        old["ltp"] = ltp
+                    cp = num(quote.get("prev_close_price", quote.get("cp")))
+                    if cp > 0:
+                        old["cp"] = cp
+                    vol = integer(quote.get("volume"))
+                    if vol > 0:
+                        old["volume"] = vol
+                    oi = integer(quote.get("oi"))
+                    if oi > 0:
+                        old["oi"] = oi
+                    depth = quote.get("depth", {})
+                    if isinstance(depth, dict):
+                        bids = depth.get("buy", [])
+                        asks = depth.get("sell", [])
+                        if bids and isinstance(bids, list) and isinstance(bids[0], dict):
+                            old["bid"] = num(bids[0].get("price"))
+                            old["bid_qty"] = integer(bids[0].get("quantity"))
+                        if asks and isinstance(asks, list) and isinstance(asks[0], dict):
+                            old["ask"] = num(asks[0].get("price"))
+                            old["ask_qty"] = integer(asks[0].get("quantity"))
+                    live_data[norm_key] = old
+                    live_data[key] = old
+    except Exception as e:
+        log_exception("OPTION REST QUOTES ERROR", e)
+
+
 def rest_loop():
+    global selected_expiry, full_chain, selected_strikes, last_atm_used
     while running:
         try:
+            # 1. Discover expiry / chain if not yet loaded
+            if not selected_expiry:
+                selected_expiry = get_expiry()
+            if selected_expiry and not full_chain:
+                full_chain = get_option_chain(selected_expiry)
+
+            # 2. Query spot NIFTY quote
             data = get_nifty_rest()
             if data and data["ltp"] > 0:
                 with data_lock:
@@ -841,6 +907,21 @@ def rest_loop():
                     if data["oi"] > 0:
                         old["oi"] = data["oi"]
                     live_data[NIFTY_KEY] = old
+
+                # Form candles via REST ticks if WebSocket ticks are not active
+                if not ws_connected or candle_status in ("WAITING", "GAP DETECTED"):
+                    update_live_candle(data["ltp"], volume=data.get("volume"))
+
+                # Initialize strikes if chain exists and strikes are empty
+                if not selected_strikes and full_chain:
+                    atm = get_atm(data["ltp"])
+                    last_atm_used = atm
+                    selected_strikes = select_options(full_chain, atm)
+
+            # 3. If WebSocket is not connected or streaming, fetch option quotes via REST
+            if not ws_connected and selected_strikes:
+                update_options_quotes_rest()
+
         except Exception as e:
             log_exception("REST LOOP ERROR", e)
         time.sleep(REST_SECONDS)
@@ -1695,13 +1776,148 @@ def display_loop():
         time.sleep(DISPLAY_SECONDS)
 
 
+_engine_lock = threading.Lock()
+_engine_started = False
+_rest_thread = None
+_display_thread = None
+
+
+def start_live_engine(token=None, force_restart=False):
+    """
+    Initializes and starts the live trading engine in background daemon threads.
+    Thread-safe and idempotent.
+    """
+    global running, streamer, selected_expiry, full_chain, selected_strikes, last_atm_used
+    global ws_connect_thread, _engine_started, _rest_thread, _display_thread
+
+    with _engine_lock:
+        if token:
+            set_access_token(token)
+
+        active_token = (ACCESS_TOKEN or os.environ.get("UPSTOX_ACCESS_TOKEN", "")).strip()
+        if not active_token or active_token in ("PASTE_YOUR_ACCESS_TOKEN_HERE", "token"):
+            safe_print("Live engine: Waiting for valid UPSTOX_ACCESS_TOKEN...")
+            return False
+
+        if _engine_started and not force_restart:
+            safe_print("Live engine: Already running.")
+            return True
+
+        safe_print(f"Live engine: {'Restarting' if _engine_started else 'Starting'} with active token...")
+        running = True
+
+        # Stop old streamer if any
+        if streamer is not None:
+            try:
+                if hasattr(streamer, "disconnect"):
+                    streamer.disconnect()
+            except Exception:
+                pass
+            streamer = None
+
+        # 1. Discover Expiry
+        try:
+            selected_expiry = get_expiry()
+        except Exception as e:
+            log_exception("START ENGINE EXPIRY ERROR", e)
+            selected_expiry = None
+
+        # 2. Load Option Chain
+        if selected_expiry:
+            try:
+                full_chain = get_option_chain(selected_expiry)
+            except Exception as e:
+                log_exception("START ENGINE CHAIN ERROR", e)
+                full_chain = None
+
+        # 3. Load initial spot & select strikes
+        try:
+            nifty = get_nifty_rest()
+            if nifty and nifty.get("ltp", 0) > 0:
+                spot = nifty["ltp"]
+                with data_lock:
+                    old = live_data.get(NIFTY_KEY, {}).copy()
+                    old.update(nifty)
+                    live_data[NIFTY_KEY] = old
+                if full_chain:
+                    atm = get_atm(spot)
+                    last_atm_used = atm
+                    selected_strikes = select_options(full_chain, atm)
+        except Exception as e:
+            log_exception("START ENGINE INITIAL SPOT ERROR", e)
+
+        # 4. Load historical candles
+        try:
+            load_historical_data()
+            refresh_today_intraday_history()
+        except Exception as e:
+            log_exception("START ENGINE HISTORY ERROR", e)
+
+        # 5. Initialize Upstox WebSocket Streamer if upstox_client is available
+        try:
+            import upstox_client
+            configuration = upstox_client.Configuration()
+            configuration.access_token = ACCESS_TOKEN
+            api_client = upstox_client.ApiClient(configuration)
+
+            streamer = upstox_client.MarketDataStreamerV3(api_client)
+            try:
+                streamer.auto_reconnect(True, 10, 20)
+            except Exception:
+                pass
+
+            streamer.on("open", on_open)
+            streamer.on("message", on_message)
+            streamer.on("error", on_error)
+            streamer.on("close", on_close)
+            try:
+                streamer.on("reconnecting", on_reconnecting)
+            except Exception:
+                pass
+            try:
+                streamer.on("autoReconnectStopped", on_auto_reconnect_stopped)
+            except Exception:
+                pass
+
+            ws_connect_thread = threading.Thread(
+                target=websocket_connect_worker,
+                daemon=True,
+                name="UpstoxWebSocketConnect",
+            )
+            ws_connect_thread.start()
+        except ImportError:
+            safe_print("NOTE: upstox_client module not found -- running in resilient REST polling fallback.")
+        except Exception as e:
+            log_exception("START ENGINE STREAMER INIT ERROR", e)
+
+        # 6. Start REST and display loops if not already alive
+        if _rest_thread is None or not _rest_thread.is_alive():
+            _rest_thread = threading.Thread(target=rest_loop, daemon=True, name="RestLoopThread")
+            _rest_thread.start()
+
+        if _display_thread is None or not _display_thread.is_alive():
+            _display_thread = threading.Thread(target=display_loop, daemon=True, name="DisplayLoopThread")
+            _display_thread.start()
+
+        _engine_started = True
+        safe_print("Live engine started successfully.")
+        return True
+
+
+def stop_live_engine():
+    global running, streamer, _engine_started
+    running = False
+    _engine_started = False
+    if streamer is not None:
+        try:
+            if hasattr(streamer, "disconnect"):
+                streamer.disconnect()
+        except Exception:
+            pass
+        streamer = None
+
+
 def main():
-    global streamer, selected_expiry, selected_strikes, running, full_chain, last_atm_used
-
-    # Deferred import: keeps the rest of this module importable/unit-
-    # testable without the broker SDK installed.
-    import upstox_client
-
     safe_print("\n==============================================")
     safe_print("V48 IMPROVED SEMI-ALGO")
     safe_print("ADX chop filter + 5-min HTF confirm + IV filter + risk layer")
@@ -1714,69 +1930,6 @@ def main():
         safe_print("thoroughly test place_real_order() first. Refusing to start.")
         return
 
-    if not ACCESS_TOKEN or ACCESS_TOKEN in ("PASTE_YOUR_ACCESS_TOKEN_HERE", "token", ""):
-        safe_print("\nERROR: Put your Upstox access token in UPSTOX_ACCESS_TOKEN environment variable (or .env file).")
-        return
-
-    selected_expiry = get_expiry()
-    if not selected_expiry:
-        safe_print("EXPIRY DISCOVERY FAILED")
-        return
-
-    chain = get_option_chain(selected_expiry)
-    if not chain:
-        safe_print("OPTION CHAIN FAILED")
-        return
-    full_chain = chain
-
-    nifty = get_nifty_rest()
-    if not nifty or num(nifty["ltp"]) <= 0:
-        safe_print("NIFTY REST DATA FAILED")
-        return
-
-    spot = nifty["ltp"]
-    safe_print("\nNIFTY SPOT:", round(spot, 2))
-    atm = get_atm(spot)
-    safe_print("ATM STRIKE:", float(atm))
-    last_atm_used = atm
-
-    selected_strikes = select_options(chain, atm)
-    if not selected_strikes:
-        safe_print("OPTION SELECTION FAILED")
-        return
-
-    load_historical_data()
-    refresh_today_intraday_history()
-
-    safe_print("\nCOMPLETED CANDLES:", len(close_history))
-    safe_print("TECHNICAL ENGINE:", "READY" if history_loaded else "NOT READY")
-
-    configuration = upstox_client.Configuration()
-    configuration.access_token = ACCESS_TOKEN
-    api_client = upstox_client.ApiClient(configuration)
-
-    streamer = upstox_client.MarketDataStreamerV3(api_client)
-    try:
-        streamer.auto_reconnect(True, 10, 20)
-    except Exception:
-        pass
-
-    streamer.on("open", on_open)
-    streamer.on("message", on_message)
-    streamer.on("error", on_error)
-    streamer.on("close", on_close)
-    try:
-        streamer.on("reconnecting", on_reconnecting)
-    except Exception:
-        pass
-    try:
-        streamer.on("autoReconnectStopped", on_auto_reconnect_stopped)
-    except Exception:
-        pass
-
-    threading.Thread(target=rest_loop, daemon=True).start()
-    threading.Thread(target=display_loop, daemon=True).start()
-
     def start_api_server():
         try:
             import uvicorn
@@ -1788,18 +1941,15 @@ def main():
     threading.Thread(target=start_api_server, daemon=True, name="FastAPIServer").start()
     safe_print("FastAPI dashboard API running at http://localhost:8000")
 
-    safe_print("\nConnecting WebSocket...")
-    global ws_connect_thread
-    ws_connect_thread = threading.Thread(target=websocket_connect_worker, daemon=True,
-                                          name="UpstoxWebSocketConnect")
-    ws_connect_thread.start()
+    start_live_engine()
 
+    global running
     try:
         while running:
             time.sleep(1)
     except KeyboardInterrupt:
         safe_print("\nStopping V48...")
-        running = False
+        stop_live_engine()
 
 
 if __name__ == "__main__":

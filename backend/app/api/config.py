@@ -159,6 +159,15 @@ def update_upstox_token(payload: TokenPayload):
     # Apply in-memory to running engine immediately
     live.set_access_token(token)
 
+    # Start or restart live engine immediately in background thread with new token
+    import threading
+    threading.Thread(
+        target=live.start_live_engine,
+        kwargs={"token": token, "force_restart": True},
+        daemon=True,
+        name="LiveEngineRestart",
+    ).start()
+
     # Update fetch_historical_data if already imported in session
     if "fetch_historical_data" in sys.modules:
         try:
