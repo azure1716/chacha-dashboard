@@ -92,7 +92,7 @@ RSI_LENGTH = 14
 ATR_LENGTH = 14
 ADX_LENGTH = 14
 
-CONFIDENCE_THRESHOLD = 75
+CONFIDENCE_THRESHOLD = int(os.environ.get("CONFIDENCE_THRESHOLD", "65"))
 MIN_DIRECTION_SCORE = 30
 
 # Chop filter: below this ADX, EMA/RSI crossovers are treated as noise,
@@ -1336,7 +1336,10 @@ def open_paper_trade(signal, confidence, spot, technical):
 
     lots = core.position_size(CAPITAL, RISK_PER_TRADE_PCT, entry_price, sl, LOT_SIZE, MAX_LOTS_PER_TRADE)
     if lots <= 0:
-        return None, "Position sizing returned 0 lots (risk budget too small for this stop distance)"
+        if not REAL_ORDER:
+            lots = 1
+        else:
+            return None, "Position sizing returned 0 lots (risk budget too small for this stop distance)"
 
     if REAL_ORDER:
         place_real_order(option, entry_price, lots)  # will raise -- see docstring

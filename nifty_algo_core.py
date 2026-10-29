@@ -349,7 +349,7 @@ def epm_score(volume_score, iv_skew, underlying_trend_score,
 
 
 def regime_score(technical_score_value, momentum_score_value, option_score_value,
-                  weights=(0.40, 0.25, 0.35)):
+                  weights=(0.40, 0.35, 0.25)):
     tw, mw, ow = weights
     score = technical_score_value * tw + momentum_score_value * mw + option_score_value * ow
     if score >= 40:
@@ -433,7 +433,7 @@ def signal_decision(technical, momentum, options, min_direction_score=30,
 
     regime = regime_score(technical["score"], momentum["score"], options["score"])
     technical_s, momentum_s, option_s = technical["score"], momentum["score"], options["score"]
-    direction_score = technical_s * 0.40 + momentum_s * 0.25 + option_s * 0.35
+    direction_score = technical_s * 0.40 + momentum_s * 0.35 + option_s * 0.25
 
     bull_votes = bear_votes = 0
     if technical_s > 0: bull_votes += 1
@@ -447,7 +447,12 @@ def signal_decision(technical, momentum, options, min_direction_score=30,
     if bull_votes == 3 or bear_votes == 3:
         confidence += 15
     elif bull_votes >= 2 or bear_votes >= 2:
-        confidence += 5
+        if abs(direction_score) >= 50:
+            confidence += 15
+        elif abs(direction_score) >= 35:
+            confidence += 10
+        else:
+            confidence += 5
 
     # EPM confirming factor (treat as confirmation, not independent trigger)
     if epm and isinstance(epm, dict):
@@ -465,7 +470,7 @@ def signal_decision(technical, momentum, options, min_direction_score=30,
           and confidence >= confidence_threshold):
         signal, reason = "BUY PUT", "Bearish multi-factor confirmation"
     else:
-        signal, reason = "WAIT", "Multi-factor confirmation not strong enough"
+        signal, reason = "WAIT", f"Confidence {confidence:.0f}% < {confidence_threshold}% (direction: {direction_score:+.1f})"
 
     # --- Higher-timeframe agreement gate ----------------------------
     if require_htf_agreement and signal != "WAIT" and htf_trend != "NEUTRAL":
