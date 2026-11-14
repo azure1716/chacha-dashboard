@@ -215,6 +215,7 @@ export const TradeHistoryPage: React.FC<TradeHistoryPageProps> = ({ currentPosit
             <thead className="bg-terminal-surface text-terminal-muted border-b border-terminal-border/60">
               <tr>
                 <th className="p-3">Time (Entry → Exit)</th>
+                <th className="p-3">Profile</th>
                 <th className="p-3">Signal</th>
                 <th className="p-3">Contract</th>
                 <th className="p-3 text-right">Lots</th>
@@ -229,13 +230,13 @@ export const TradeHistoryPage: React.FC<TradeHistoryPageProps> = ({ currentPosit
             <tbody className="divide-y divide-terminal-border/40">
               {loading ? (
                 <tr>
-                  <td colSpan={10} className="p-6 text-center text-terminal-muted">
+                  <td colSpan={11} className="p-6 text-center text-terminal-muted">
                     Loading trade records from trades_log.csv...
                   </td>
                 </tr>
               ) : trades.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="p-8 text-center text-terminal-muted">
+                  <td colSpan={11} className="p-8 text-center text-terminal-muted">
                     No closed paper trades match the selected criteria.
                   </td>
                 </tr>
@@ -253,6 +254,16 @@ export const TradeHistoryPage: React.FC<TradeHistoryPageProps> = ({ currentPosit
                         <span>{t.entry_time || '--'}</span>
                         <span className="text-terminal-muted"> → </span>
                         <span>{t.exit_time || '--'}</span>
+                      </td>
+
+                      <td className="p-3 whitespace-nowrap">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                          (t.strategy_profile || 'BALANCED').toUpperCase() === 'SCALP'
+                            ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60'
+                            : 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60'
+                        }`}>
+                          {(t.strategy_profile || 'BALANCED').toUpperCase() === 'SCALP' ? 'Scalp' : 'Balanced'}
+                        </span>
                       </td>
 
                       <td className="p-3 whitespace-nowrap">

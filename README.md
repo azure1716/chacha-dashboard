@@ -91,6 +91,11 @@ All metrics presented in this dashboard reflect the unaltered math of the underl
 5. **EPM Module Status (Beta — Formula Pending):**
    `epm_score()` in `nifty_algo_core.py` is a placeholder implementing the conceptual behavior described in chat notes (combining option volume skew, IV skew, and technical trend). It acts solely as a confirming factor for direction score and does not generate trades independently.
 
+6. **Strategy Profiles (Balanced vs Scalp) Caveat:**
+   The dashboard provides two switchable strategy configurations: **Balanced** (the default engine) and **Scalp** (a tighter, more active intraday variant).
+   > *Honest truth:* Scalp is an alternative, equally unvalidated heuristic parameter set — **it is NOT a proven or statistically superior improvement over Balanced**. It trades tighter targets and trailing stops with relaxed dual-timeframe vetoes, but is subject to whipsaw and slippage in live markets.
+   > Furthermore, switching profiles via the dashboard UI persists to `.env` and applies strictly to subsequent live ticks; it **does not retroactively relabel past rows in `signals_log.csv` or `trades_log.csv`** generated under the prior profile.
+
 ---
 
 ## Setup & Installation
@@ -176,7 +181,44 @@ Open **[http://localhost:5173](http://localhost:5173)**. The Vite dev server pro
 | **Signals Audit Log** | Tick-by-tick decision diagnostics | Full browsable view of `signals_log.csv` showing why the engine entered or passed on every single tick, with detailed parameter inspector modal. |
 | **Backtest Lab** | Directional replay runner | Non-blocking background backtest executor on synthetic or uploaded historical 1-min CSVs, equity curve visualization, exit reason breakdown, and explicit methodology caveats. |
 | **Parameter Sweep** | Strategy sensitivity explorer | Background grid search across SL, Target, and ADX filters with multiple-testing warning banner, 2D SL×Target heatmap, and sortable profit-factor table. |
-| **System / Config** | Engine transparency & tests | Live read-only parameters pulled directly from engine memory, exception ring buffer, in-UI Upstox daily token renewal, and one-click "Run Self-Tests" harness. |
+| **System / Config** | Engine transparency & tests | Live read-only parameters pulled directly from engine memory, live toggleable Strategy Profile switcher (Balanced vs Scalp) with open-position safety lock, exception ring buffer, in-UI Upstox daily token renewal, and one-click "Run Self-Tests" harness. |
+
+---
+
+## Strategy Profiles: Balanced vs Scalp
+
+The paper-trading engine supports two distinct strategy configurations switchable directly from the **System Config** dashboard panel without restarting the engine. The selection survives backend restarts by persisting to `.env` as `STRATEGY_PROFILE=<BALANCED|SCALP>`.
+
+### Strategy Comparison Table
+
+| Parameter | Balanced (Default) | Scalp | Purpose & Mechanics |
+|---|---|---|---|
+| **Confidence Threshold** | `65%` | `70%` | Minimum multi-factor confidence required for trade signal |
+| **ADX Trend Floor** | `18` | `16` | Minimum ADX required; below this, signals return `WAIT (chop filter)` |
+| **HTF Trend Veto** | Single TF (`5-min`) | Relaxed Dual TF (`3-min` + `5-min`) | Balanced vetoes on 5-min alone; Scalp only vetoes if **both** 3m and 5m oppose |
+| **ATR SL Multiplier** | `1.2x` | `1.0x` | Multiplier for delta-adjusted stop-loss distance |
+| **ATR Target Multiplier** | `2.4x` | `2.0x` | Multiplier for delta-adjusted profit target distance |
+| **Trailing Stop Activation (R)** | `1.0 R` | `0.8 R` | Favorable move required before trailing stop engages |
+| **Trailing Stop Distance (R)** | `0.8 R` | `0.6 R` | Distance behind the peak mark price to trail |
+| **Max Trades / Day** | `6` | `8` | Maximum executions allowed per day |
+| **IV Percentile Cap** | `80%` | `75%` | Rejects options whose IV rank in their recent history exceeds cap |
+| **Max Quoted Spread Cap** | None (Disabled) | `3.5%` | Rejects options if `(ask - bid) / ltp * 100 > 3.5%` |
+| **VWAP-Stretch Filter** | None (Disabled) | `2.5x ATR` | Blocks signal if `\|spot - vwap\| > 2.5 * ATR` with reason `"VWAP STRETCHED"` |
+| **Trading Session Window** | `09:25 – 14:50 IST` | `09:20 – 14:45 IST` | Intraday entry window |
+| **Lunch-Hour Exclusion** | None (Disabled) | `11:30 – 13:30 IST` | Blocks entries during midday chop window |
+
+### Operational Invariants & Safety Locks
+
+1. **Open Position Lock:** The profile toggle is strictly disabled and rejected by the API if an active paper trade is open (`paper_trade is not None`). Attempting to switch returns:
+   ```json
+   {
+     "success": false,
+     "reason": "Cannot switch profile with an open position (<signal> <strike>). Wait for it to close."
+   }
+   ```
+   This prevents open trades from having their active stops, targets, or trailing logic mutated mid-trade.
+2. **Audit Attribution:** Every row written to `signals_log.csv` and `trades_log.csv` includes the active `strategy_profile` column. Historical rows lacking this column are seamlessly back-filled as `"BALANCED"`.
+3. **No Secret Broker Execution:** Both profiles run exclusively under paper trading (`REAL_ORDER = False`). `place_real_order()` remains permanently disabled.
 
 ---
 

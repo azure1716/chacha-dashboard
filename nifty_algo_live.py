@@ -92,36 +92,97 @@ RSI_LENGTH = 14
 ATR_LENGTH = 14
 ADX_LENGTH = 14
 
-CONFIDENCE_THRESHOLD = int(os.environ.get("CONFIDENCE_THRESHOLD", "65"))
+# ============================================================
+# STRATEGY PROFILES (Toggleable Strategy Configurations)
+# ============================================================
+
+STRATEGY_PROFILES = {
+    "BALANCED": {
+        "name": "BALANCED",
+        "label": "Balanced",
+        "description": "Default multi-factor trend-following strategy with single 5-min HTF confirmation, standard ATR targets, and full-day trading window.",
+        "confidence_threshold": 65,
+        "min_adx_for_trend_signal": 18,
+        "htf_veto_mode": "single_tf",
+        "atr_sl_multiplier": 1.2,
+        "atr_target_multiplier": 2.4,
+        "trail_activate_r": 1.0,
+        "trail_distance_r": 0.8,
+        "max_trades_per_day": 6,
+        "iv_percentile_max": 80,
+        "max_spread_pct": None,
+        "vwap_stretch_atr": None,
+        "trade_start_minutes": 9 * 60 + 25,  # 565 (09:25)
+        "trade_end_minutes": 14 * 60 + 50,    # 890 (14:50)
+        "trade_start_str": "09:25",
+        "trade_end_str": "14:50",
+        "lunch_start_minutes": None,
+        "lunch_end_minutes": None,
+        "lunch_start_str": None,
+        "lunch_end_str": None,
+    },
+    "SCALP": {
+        "name": "SCALP",
+        "label": "Scalp",
+        "description": "Tuned for frequent intraday scalps with tighter SL/targets, relaxed dual HTF veto (3m+5m), spread cap (3.5%), VWAP-stretch filter, and lunch-hour exclusion (11:30-13:30 IST).",
+        "confidence_threshold": 70,
+        "min_adx_for_trend_signal": 16,
+        "htf_veto_mode": "both_tf",
+        "atr_sl_multiplier": 1.0,
+        "atr_target_multiplier": 2.0,
+        "trail_activate_r": 0.8,
+        "trail_distance_r": 0.6,
+        "max_trades_per_day": 8,
+        "iv_percentile_max": 75,
+        "max_spread_pct": 3.5,
+        "vwap_stretch_atr": 2.5,
+        "trade_start_minutes": 9 * 60 + 20,  # 560 (09:20)
+        "trade_end_minutes": 14 * 60 + 45,    # 885 (14:45)
+        "trade_start_str": "09:20",
+        "trade_end_str": "14:45",
+        "lunch_start_minutes": 11 * 60 + 30, # 690 (11:30)
+        "lunch_end_minutes": 13 * 60 + 30,   # 810 (13:30)
+        "lunch_start_str": "11:30",
+        "lunch_end_str": "13:30",
+    },
+}
+
+ACTIVE_STRATEGY_PROFILE = os.environ.get("STRATEGY_PROFILE", "BALANCED").upper().strip()
+if ACTIVE_STRATEGY_PROFILE not in STRATEGY_PROFILES:
+    ACTIVE_STRATEGY_PROFILE = "BALANCED"
+
+_init_profile = STRATEGY_PROFILES[ACTIVE_STRATEGY_PROFILE]
+
+CONFIDENCE_THRESHOLD = int(os.environ.get("CONFIDENCE_THRESHOLD", str(_init_profile["confidence_threshold"])))
 MIN_DIRECTION_SCORE = 30
+MIN_ADX_FOR_TREND_SIGNAL = _init_profile["min_adx_for_trend_signal"]
 
-# Chop filter: below this ADX, EMA/RSI crossovers are treated as noise,
-# not a real trend. 18-20 is a common starting point -- validate against
-# your own backtest rather than trusting this number blindly.
-MIN_ADX_FOR_TREND_SIGNAL = 18
-
-# Multi-timeframe confirmation: built by resampling the SAME 1-min
-# history into 5-min bars (no extra API calls). A 1-min signal against
-# the 5-min trend is blocked.
 REQUIRE_HTF_AGREEMENT = True
 HTF_FACTOR = 5
+HTF_VETO_MODE = _init_profile["htf_veto_mode"]
 
-# Low-volatility filter as % of spot instead of a fixed point value.
 ATR_PCT_MIN = 0.015
-
-# IV filter: skip an entry if the chosen option's IV sits above this
-# percentile of ITS OWN recent IV history (i.e. don't buy premium that's
-# already expensive relative to how it's been trading).
-IV_PERCENTILE_MAX = 80
+IV_PERCENTILE_MAX = _init_profile["iv_percentile_max"]
 IV_HISTORY_LEN = 300
 
-ATR_SL_MULTIPLIER = 1.2
-ATR_TARGET_MULTIPLIER = 2.4
-TRAIL_ACTIVATE_R = 1.0
-TRAIL_DISTANCE_R = 0.8
+ATR_SL_MULTIPLIER = _init_profile["atr_sl_multiplier"]
+ATR_TARGET_MULTIPLIER = _init_profile["atr_target_multiplier"]
+TRAIL_ACTIVATE_R = _init_profile["trail_activate_r"]
+TRAIL_DISTANCE_R = _init_profile["trail_distance_r"]
 
-TRADE_START_MINUTES = 9 * 60 + 25
-TRADE_END_MINUTES = 14 * 60 + 50
+MAX_SPREAD_PCT = _init_profile["max_spread_pct"]
+VWAP_STRETCH_ATR = _init_profile["vwap_stretch_atr"]
+
+TRADE_START_MINUTES = _init_profile["trade_start_minutes"]
+TRADE_END_MINUTES = _init_profile["trade_end_minutes"]
+TRADE_START_STR = _init_profile["trade_start_str"]
+TRADE_END_STR = _init_profile["trade_end_str"]
+LUNCH_START_MINUTES = _init_profile["lunch_start_minutes"]
+LUNCH_END_MINUTES = _init_profile["lunch_end_minutes"]
+LUNCH_START_STR = _init_profile["lunch_start_str"]
+LUNCH_END_STR = _init_profile["lunch_end_str"]
+
+MAX_TRADES_PER_DAY = _init_profile["max_trades_per_day"]
 
 # --- Risk management (V47.2 had none of this) ------------------
 CAPITAL = 100000.0          # << SET THIS to your actual paper/real capital
@@ -133,7 +194,6 @@ MAX_LOTS_PER_TRADE = 5
 MAX_DAILY_LOSS = 3000.0      # halt new entries for the day past this loss
 DAILY_PROFIT_LOCK = None     # e.g. 6000.0 to stop trading after hitting a
                               # daily profit target; None disables it
-MAX_TRADES_PER_DAY = 6
 MAX_CONSECUTIVE_LOSSES = 3
 COOLDOWN_MINUTES_AFTER_STREAK = 30
 
@@ -158,6 +218,114 @@ def set_access_token(new_token: str) -> None:
     ACCESS_TOKEN = (new_token or "").strip()
     HEADERS["Authorization"] = f"Bearer {ACCESS_TOKEN}"
     os.environ["UPSTOX_ACCESS_TOKEN"] = ACCESS_TOKEN
+
+
+def _update_env_file(key: str, value: str, filepath: str) -> None:
+    lines = []
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception:
+            lines = []
+    found = False
+    new_lines = []
+    for line in lines:
+        if line.strip().startswith(f"{key}=") or line.strip().startswith(f"export {key}="):
+            new_lines.append(f"{key}={value}\n")
+            found = True
+        else:
+            new_lines.append(line)
+    if not found:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines.append("\n")
+        new_lines.append(f"{key}={value}\n")
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        safe_print("ENV UPDATE ERROR:", filepath, e)
+
+
+def _apply_strategy_profile(name: str):
+    global ACTIVE_STRATEGY_PROFILE, CONFIDENCE_THRESHOLD, MIN_ADX_FOR_TREND_SIGNAL
+    global HTF_VETO_MODE, ATR_SL_MULTIPLIER, ATR_TARGET_MULTIPLIER
+    global TRAIL_ACTIVATE_R, TRAIL_DISTANCE_R, MAX_TRADES_PER_DAY
+    global IV_PERCENTILE_MAX, MAX_SPREAD_PCT, VWAP_STRETCH_ATR
+    global TRADE_START_MINUTES, TRADE_END_MINUTES, TRADE_START_STR, TRADE_END_STR
+    global LUNCH_START_MINUTES, LUNCH_END_MINUTES, LUNCH_START_STR, LUNCH_END_STR
+
+    p = STRATEGY_PROFILES[name]
+    ACTIVE_STRATEGY_PROFILE = name
+    CONFIDENCE_THRESHOLD = p["confidence_threshold"]
+    MIN_ADX_FOR_TREND_SIGNAL = p["min_adx_for_trend_signal"]
+    HTF_VETO_MODE = p["htf_veto_mode"]
+    ATR_SL_MULTIPLIER = p["atr_sl_multiplier"]
+    ATR_TARGET_MULTIPLIER = p["atr_target_multiplier"]
+    TRAIL_ACTIVATE_R = p["trail_activate_r"]
+    TRAIL_DISTANCE_R = p["trail_distance_r"]
+    MAX_TRADES_PER_DAY = p["max_trades_per_day"]
+    IV_PERCENTILE_MAX = p["iv_percentile_max"]
+    MAX_SPREAD_PCT = p["max_spread_pct"]
+    VWAP_STRETCH_ATR = p["vwap_stretch_atr"]
+    TRADE_START_MINUTES = p["trade_start_minutes"]
+    TRADE_END_MINUTES = p["trade_end_minutes"]
+    TRADE_START_STR = p["trade_start_str"]
+    TRADE_END_STR = p["trade_end_str"]
+    LUNCH_START_MINUTES = p["lunch_start_minutes"]
+    LUNCH_END_MINUTES = p["lunch_end_minutes"]
+    LUNCH_START_STR = p["lunch_start_str"]
+    LUNCH_END_STR = p["lunch_end_str"]
+
+
+def set_strategy_profile(name: str) -> dict:
+    norm_name = (name or "").strip().upper()
+    if norm_name not in STRATEGY_PROFILES:
+        return {
+            "success": False,
+            "reason": f"Unknown strategy profile '{name}'. Available: {list(STRATEGY_PROFILES.keys())}"
+        }
+
+    with data_lock:
+        if paper_trade is not None:
+            sig = paper_trade.get("signal", "")
+            strike = paper_trade.get("strike", "")
+            return {
+                "success": False,
+                "reason": f"Cannot switch profile with an open position ({sig} {strike}). Wait for it to close."
+            }
+        _apply_strategy_profile(norm_name)
+
+    # Persist to .env so choice survives a restart
+    try:
+        root_dir = os.path.dirname(os.path.abspath(__file__))
+        root_env = os.path.join(root_dir, ".env")
+        _update_env_file("STRATEGY_PROFILE", norm_name, root_env)
+        backend_env = os.path.join(root_dir, "backend", ".env")
+        if os.path.exists(os.path.dirname(backend_env)):
+            _update_env_file("STRATEGY_PROFILE", norm_name, backend_env)
+        os.environ["STRATEGY_PROFILE"] = norm_name
+    except Exception as e:
+        safe_print("FAILED TO PERSIST STRATEGY_PROFILE TO .env:", e)
+
+    return {
+        "success": True,
+        "profile": norm_name,
+        "message": f"Strategy profile switched to {norm_name} successfully."
+    }
+
+
+def get_active_strategy_profile() -> dict:
+    with data_lock:
+        name = ACTIVE_STRATEGY_PROFILE
+        p = dict(STRATEGY_PROFILES.get(name, STRATEGY_PROFILES["BALANCED"]))
+        is_locked = paper_trade is not None
+    return {
+        "active": name,
+        "available": list(STRATEGY_PROFILES.keys()),
+        "parameters": p,
+        "locked": is_locked,
+    }
 
 
 def verify_upstox_token(token: str) -> dict:
@@ -360,13 +528,21 @@ def nse_market_open_now():
         return False
 
 
-def is_trade_time():
+def is_trade_time(now_ist=None, lunch_start_minutes=None, lunch_end_minutes=None,
+                  trade_start_minutes=None, trade_end_minutes=None):
     try:
-        now_ist = get_ist_now()
+        if now_ist is None:
+            now_ist = get_ist_now()
         if now_ist.weekday() >= 5:
             return False
         minutes = now_ist.hour * 60 + now_ist.minute
-        return TRADE_START_MINUTES <= minutes <= TRADE_END_MINUTES
+        s_min = trade_start_minutes if trade_start_minutes is not None else TRADE_START_MINUTES
+        e_min = trade_end_minutes if trade_end_minutes is not None else TRADE_END_MINUTES
+        l_start = lunch_start_minutes if lunch_start_minutes is not None else LUNCH_START_MINUTES
+        l_end = lunch_end_minutes if lunch_end_minutes is not None else LUNCH_END_MINUTES
+
+        allowed, _ = core.is_within_trade_window(minutes, s_min, e_min, l_start, l_end)
+        return allowed
     except Exception:
         return False
 
@@ -704,12 +880,14 @@ def update_live_candle(ltp, volume=None, event_time=None):
 def get_indicator_series():
     with data_lock:
         closes = list(close_history); highs = list(high_history); lows = list(low_history)
+        volumes = list(volume_history)
         c = dict(current_candle); hist_last = historical_last_minute; status = candle_status
 
     if (c.get("minute") is not None and c.get("close", 0) > 0 and hist_last is not None and
             c["minute"] == hist_last + 1 and status in ("CONTINUOUS", "LIVE CANDLE")):
         closes.append(c["close"]); highs.append(c["high"]); lows.append(c["low"])
-    return {"closes": closes, "highs": highs, "lows": lows}
+        volumes.append(c.get("volume", 0))
+    return {"closes": closes, "highs": highs, "lows": lows, "volumes": volumes}
 
 
 def parse_message(message):
@@ -976,10 +1154,11 @@ def compute_momentum():
     return core.momentum_score(series["closes"], rsi_length=RSI_LENGTH)
 
 
-def compute_htf_trend():
+def compute_htf_trend(factor=None):
+    f = factor if factor is not None else HTF_FACTOR
     series = get_indicator_series()
     return core.higher_timeframe_trend(series["highs"], series["lows"], series["closes"],
-                                        factor=HTF_FACTOR, ema_fast=EMA_FAST, ema_slow=EMA_SLOW)
+                                        factor=f, ema_fast=EMA_FAST, ema_slow=EMA_SLOW)
 
 
 def compute_option_pressure():
@@ -1062,7 +1241,11 @@ def live_signal_ready():
     if hist_minute is None or live_min > hist_minute + 1:
         return False, "WAIT: HISTORICAL/LIVE CANDLE GAP"
     if not is_trade_time():
-        return False, "OUTSIDE TRADE WINDOW (09:25-14:50)"
+        now_ist = get_ist_now()
+        minutes = now_ist.hour * 60 + now_ist.minute
+        if LUNCH_START_MINUTES is not None and LUNCH_END_MINUTES is not None and LUNCH_START_MINUTES <= minutes <= LUNCH_END_MINUTES:
+            return False, f"LUNCH HOUR EXCLUSION ({LUNCH_START_STR}-{LUNCH_END_STR})"
+        return False, f"OUTSIDE TRADE WINDOW ({TRADE_START_STR}-{TRADE_END_STR})"
 
     elapsed = 0.0
     if started and started_at is not None:
@@ -1080,7 +1263,8 @@ def generate_signal(spot=None):
         tech = compute_technical()
         mom = compute_momentum()
         opts = compute_option_pressure()
-        htf = compute_htf_trend()
+        htf = compute_htf_trend(factor=5)
+        htf_3m = compute_htf_trend(factor=3) if HTF_VETO_MODE == "both_tf" else "NEUTRAL"
         epm = core.epm_score(
             volume_score=opts.get("volume_score", 0.0),
             iv_skew=opts.get("iv_skew", 0.0),
@@ -1091,11 +1275,15 @@ def generate_signal(spot=None):
             "technical": tech, "momentum": mom,
             "options": opts, "htf_trend": htf,
             "epm": epm,
+            "strategy_profile": ACTIVE_STRATEGY_PROFILE,
         }
+        if HTF_VETO_MODE == "both_tf":
+            result["htf_trend_3m"] = htf_3m
         last_signal_audit = {
             "signal": result["signal"], "confidence": 0.0,
             "reason": result.get("reason", ""), "timestamp": time.strftime("%H:%M:%S"),
             "epm": epm,
+            "strategy_profile": ACTIVE_STRATEGY_PROFILE,
         }
         log_signal_to_csv(result, spot)
         return result
@@ -1103,7 +1291,8 @@ def generate_signal(spot=None):
     technical = compute_technical()
     momentum = compute_momentum()
     options = compute_option_pressure()
-    htf_trend = compute_htf_trend()
+    htf_trend = compute_htf_trend(factor=5)
+    htf_trend_3m = compute_htf_trend(factor=3) if HTF_VETO_MODE == "both_tf" else "NEUTRAL"
     epm = core.epm_score(
         volume_score=options.get("volume_score", 0.0),
         iv_skew=options.get("iv_skew", 0.0),
@@ -1115,11 +1304,15 @@ def generate_signal(spot=None):
             "signal": "WAIT", "confidence": 0.0, "reason": "Technical history not ready",
             "technical": technical, "momentum": momentum, "options": options, "htf_trend": htf_trend,
             "epm": epm,
+            "strategy_profile": ACTIVE_STRATEGY_PROFILE,
         }
+        if HTF_VETO_MODE == "both_tf":
+            result["htf_trend_3m"] = htf_trend_3m
         last_signal_audit = {
             "signal": result["signal"], "confidence": 0.0,
             "reason": result.get("reason", ""), "timestamp": time.strftime("%H:%M:%S"),
             "epm": epm,
+            "strategy_profile": ACTIVE_STRATEGY_PROFILE,
         }
         log_signal_to_csv(result, spot)
         return result
@@ -1131,14 +1324,43 @@ def generate_signal(spot=None):
             "reason": f"Low volatility filter (ATR {atr_pct:.4f}% of spot < {ATR_PCT_MIN}%)",
             "technical": technical, "momentum": momentum, "options": options, "htf_trend": htf_trend,
             "epm": epm,
+            "strategy_profile": ACTIVE_STRATEGY_PROFILE,
         }
+        if HTF_VETO_MODE == "both_tf":
+            result["htf_trend_3m"] = htf_trend_3m
         last_signal_audit = {
             "signal": result["signal"], "confidence": 0.0,
             "reason": result.get("reason", ""), "timestamp": time.strftime("%H:%M:%S"),
             "epm": epm,
+            "strategy_profile": ACTIVE_STRATEGY_PROFILE,
         }
         log_signal_to_csv(result, spot)
         return result
+
+    # VWAP-stretch filter (engaged if configured in active profile, e.g. SCALP)
+    if VWAP_STRETCH_ATR is not None:
+        series = get_indicator_series()
+        vwap = core.calculate_vwap(series["highs"], series["lows"], series["closes"], series.get("volumes", []))
+        curr_spot = spot if (spot is not None and spot > 0) else (series["closes"][-1] if series["closes"] else 0.0)
+        atr = technical.get("atr")
+        is_stretched, _ = core.check_vwap_stretch(curr_spot, vwap, atr, VWAP_STRETCH_ATR)
+        if is_stretched:
+            result = {
+                "signal": "WAIT", "confidence": 0.0, "reason": "VWAP STRETCHED",
+                "technical": technical, "momentum": momentum, "options": options,
+                "htf_trend": htf_trend, "epm": epm, "vwap": vwap,
+                "strategy_profile": ACTIVE_STRATEGY_PROFILE,
+            }
+            if HTF_VETO_MODE == "both_tf":
+                result["htf_trend_3m"] = htf_trend_3m
+            last_signal_audit = {
+                "signal": result["signal"], "confidence": 0.0,
+                "reason": result.get("reason", ""), "timestamp": time.strftime("%H:%M:%S"),
+                "epm": epm,
+                "strategy_profile": ACTIVE_STRATEGY_PROFILE,
+            }
+            log_signal_to_csv(result, spot)
+            return result
 
     decision = core.signal_decision(
         technical, momentum, options,
@@ -1148,18 +1370,24 @@ def generate_signal(spot=None):
         require_htf_agreement=REQUIRE_HTF_AGREEMENT,
         htf_trend=htf_trend,
         epm=epm,
+        htf_trend_3m=htf_trend_3m,
+        htf_veto_mode=HTF_VETO_MODE,
     )
     result = dict(decision)
     result.update({
         "technical": technical, "momentum": momentum,
         "options": options, "htf_trend": htf_trend,
         "epm": epm,
+        "strategy_profile": ACTIVE_STRATEGY_PROFILE,
     })
+    if HTF_VETO_MODE == "both_tf":
+        result["htf_trend_3m"] = htf_trend_3m
 
     last_signal_audit = {
         "signal": result["signal"], "confidence": result.get("confidence", 0.0),
         "reason": result.get("reason", ""), "timestamp": time.strftime("%H:%M:%S"),
         "epm": epm,
+        "strategy_profile": ACTIVE_STRATEGY_PROFILE,
     }
     log_signal_to_csv(result, spot)
     return result
@@ -1196,7 +1424,7 @@ def _append_csv(path, fieldnames, row):
 SIGNAL_FIELDS = ["timestamp", "spot", "signal", "confidence", "reason",
                   "technical_score", "trend", "trend_strength", "adx",
                   "momentum_score", "option_score", "option_bias",
-                  "htf_trend", "atr_pct", "epm_score", "epm_bias"]
+                  "htf_trend", "atr_pct", "epm_score", "epm_bias", "strategy_profile"]
 
 
 def log_signal_to_csv(result, spot):
@@ -1221,6 +1449,7 @@ def log_signal_to_csv(result, spot):
         "atr_pct": technical.get("atr_pct"),
         "epm_score": epm.get("score") if isinstance(epm, dict) else None,
         "epm_bias": epm.get("bias") if isinstance(epm, dict) else None,
+        "strategy_profile": result.get("strategy_profile", ACTIVE_STRATEGY_PROFILE),
     }
     _append_csv(SIGNALS_LOG_PATH, SIGNAL_FIELDS, row)
 
@@ -1228,11 +1457,13 @@ def log_signal_to_csv(result, spot):
 TRADE_FIELDS = ["entry_time", "exit_time", "signal", "direction", "strike", "type", "lots",
                  "entry", "exit", "sl", "target", "atr_used", "option_delta", "confidence",
                  "iv_percentile_at_entry", "gross_pnl", "cost", "net_pnl", "exit_reason",
-                 "used_ltp_fallback_entry", "used_ltp_fallback_exit"]
+                 "used_ltp_fallback_entry", "used_ltp_fallback_exit", "strategy_profile"]
 
 
 def log_trade_to_csv(record):
     row = {k: record.get(k) for k in TRADE_FIELDS}
+    if not row.get("strategy_profile"):
+        row["strategy_profile"] = record.get("strategy_profile", ACTIVE_STRATEGY_PROFILE)
     _append_csv(TRADES_LOG_PATH, TRADE_FIELDS, row)
 
 
@@ -1279,6 +1510,8 @@ def select_trade_option(signal, spot):
         if bid > 0 and ask > 0:
             spread_pct = (ask - bid) / ltp * 100.0 if ltp > 0 else 999
             if spread_pct > 8.0:   # skip strikes with an unreasonably wide quoted spread
+                continue
+            if MAX_SPREAD_PCT is not None and not core.is_spread_acceptable(bid, ask, ltp=ltp, spread_pct_max=MAX_SPREAD_PCT):
                 continue
         distance = abs(item["strike"] - atm)
         score = (vol * 0.6 + oi * 0.3) - (distance * 2)
@@ -1353,6 +1586,7 @@ def open_paper_trade(signal, confidence, spot, technical):
         "confidence": confidence, "iv_percentile_at_entry": iv_pct,
         "used_ltp_fallback_entry": used_ltp_fallback_entry,
         "entry_time": time.strftime("%H:%M:%S"),
+        "strategy_profile": ACTIVE_STRATEGY_PROFILE,
     }
     trades_today += 1
 
@@ -1731,6 +1965,12 @@ def get_state_snapshot():
         "token_status": {
             "has_token": bool(ACCESS_TOKEN and len(ACCESS_TOKEN.strip()) > 10),
             "token_masked": f"••••••••{ACCESS_TOKEN.strip()[-4:]}" if (ACCESS_TOKEN and len(ACCESS_TOKEN.strip()) >= 8) else ("Not set"),
+        },
+        "strategy_profile": {
+            "active": ACTIVE_STRATEGY_PROFILE,
+            "label": STRATEGY_PROFILES.get(ACTIVE_STRATEGY_PROFILE, {}).get("label", ACTIVE_STRATEGY_PROFILE),
+            "locked": pt_copy is not None,
+            "parameters": STRATEGY_PROFILES.get(ACTIVE_STRATEGY_PROFILE, {}),
         },
         "real_order": REAL_ORDER,
         "banner": "PAPER TRADING ONLY — no real orders are placed by this system.",

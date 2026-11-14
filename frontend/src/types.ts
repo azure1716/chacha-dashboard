@@ -1,5 +1,37 @@
 export type SignalType = "BUY CALL" | "BUY PUT" | "WAIT";
 
+export interface StrategyProfileParameters {
+  name: string;
+  label: string;
+  description: string;
+  confidence_threshold: number;
+  min_adx_for_trend_signal: number;
+  htf_veto_mode: "single_tf" | "both_tf";
+  atr_sl_multiplier: number;
+  atr_target_multiplier: number;
+  trail_activate_r: number;
+  trail_distance_r: number;
+  max_trades_per_day: number;
+  iv_percentile_max: number;
+  max_spread_pct: number | null;
+  vwap_stretch_atr: number | null;
+  trade_start_minutes: number;
+  trade_end_minutes: number;
+  trade_start_str: string;
+  trade_end_str: string;
+  lunch_start_minutes: number | null;
+  lunch_end_minutes: number | null;
+  lunch_start_str: string | null;
+  lunch_end_str: string | null;
+}
+
+export interface StrategyProfileInfo {
+  active: "BALANCED" | "SCALP" | string;
+  available: string[];
+  parameters: StrategyProfileParameters;
+  locked: boolean;
+}
+
 export interface CandleData {
   time: number;
   open: number;
@@ -145,6 +177,12 @@ export interface LiveStateSnapshot {
     has_token: boolean;
     token_masked: string;
   };
+  strategy_profile?: {
+    active: string;
+    label: string;
+    locked: boolean;
+    parameters?: StrategyProfileParameters;
+  };
   real_order: boolean;
   banner: string;
 }
@@ -166,6 +204,7 @@ export interface SignalLogRow {
   atr_pct: string;
   epm_score?: string;
   epm_bias?: string;
+  strategy_profile?: string;
 }
 
 export interface TradeLogRow {
@@ -190,6 +229,7 @@ export interface TradeLogRow {
   exit_reason: string;
   used_ltp_fallback_entry?: string;
   used_ltp_fallback_exit?: string;
+  strategy_profile?: string;
 }
 
 export interface TradeStatsSummary {
@@ -315,6 +355,7 @@ export interface SystemConfig {
     description: string;
   };
   warnings: Record<string, string>;
+  strategy_profile?: StrategyProfileInfo;
   recent_exceptions: Array<{
     timestamp: string;
     label: string;

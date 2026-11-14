@@ -1,7 +1,7 @@
 import React from 'react';
 import { LiveStateSnapshot } from '../types';
 import { ConnectionMode } from '../hooks/useLiveStream';
-import { Server, Database, Radio, Flame, CheckCircle, AlertCircle, RefreshCw, Key } from 'lucide-react';
+import { Server, Database, Radio, Flame, CheckCircle, AlertCircle, RefreshCw, Key, SlidersHorizontal } from 'lucide-react';
 
 interface ConnectionStripProps {
   snapshot: LiveStateSnapshot | null;
@@ -25,6 +25,15 @@ export const ConnectionStrip: React.FC<ConnectionStripProps> = ({
   return (
     <div className="glass-panel rounded-xl p-3 border border-terminal-border flex flex-wrap items-center justify-between gap-3 text-xs">
       <div className="flex flex-wrap items-center gap-4 sm:gap-6">
+        {/* Strategy Profile */}
+        <div className="flex items-center gap-2">
+          <SlidersHorizontal className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="text-terminal-muted">Profile:</span>
+          <span className="font-mono font-bold px-2 py-0.5 rounded text-[11px] bg-cyan-950/80 text-cyan-300 border border-cyan-800/60">
+            {snapshot?.strategy_profile?.label || (snapshot?.strategy_profile?.active === 'SCALP' ? 'Scalp' : 'Balanced')}
+          </span>
+        </div>
+
         {/* WebSocket */}
         <div className="flex items-center gap-2">
           <Radio className="w-3.5 h-3.5 text-cyan-400" />

@@ -175,6 +175,115 @@ sd_with_epm = core.signal_decision(ts, ms, ops, htf_trend="BULLISH", epm=epm_bul
 check("signal_decision includes epm and bumps confidence on confirmation", sd_with_epm["confidence"] >= sd["confidence"])
 
 # ---------------------------------------------------------------
+# 12. VWAP calculation & VWAP-stretch filter
+# ---------------------------------------------------------------
+vwap_flat = core.calculate_vwap([100.0] * 10, [100.0] * 10, [100.0] * 10, [500.0] * 10)
+check("calculate_vwap on flat series == 100", math.isclose(vwap_flat, 100.0, abs_tol=1e-6))
+
+# Hand-built synthetic series:
+# Bar 1: H=10, L=10, C=10 (TP=10), Vol=100 -> TP*V = 1000
+# Bar 2: H=20, L=20, C=20 (TP=20), Vol=300 -> TP*V = 6000
+# Total TP*V = 7000, Total Vol = 400. VWAP = 7000 / 400 = 17.5
+synth_h = [10.0, 20.0]
+synth_l = [10.0, 20.0]
+synth_c = [10.0, 20.0]
+synth_v = [100.0, 300.0]
+vwap_synth = core.calculate_vwap(synth_h, synth_l, synth_c, synth_v)
+print("    calculate_vwap on synthetic 2-bar series:", vwap_synth)
+check("calculate_vwap on synthetic series == 17.5", math.isclose(vwap_synth, 17.5, abs_tol=1e-6))
+
+# Edge cases
+check("calculate_vwap returns None on empty series", core.calculate_vwap([], [], [], []) is None)
+check("calculate_vwap returns None on zero volume", core.calculate_vwap([10.0], [10.0], [10.0], [0.0]) is None)
+
+# VWAP stretch check
+stretched_no, diff_no = core.check_vwap_stretch(spot=24000.0, vwap=24000.0, atr=10.0, vwap_stretch_atr=2.5)
+check("check_vwap_stretch returns False when within threshold", stretched_no is False)
+stretched_yes, diff_yes = core.check_vwap_stretch(spot=24030.0, vwap=24000.0, atr=10.0, vwap_stretch_atr=2.5)
+check("check_vwap_stretch returns True when diff (30) > 2.5 * ATR (25)", stretched_yes is True)
+
+# ---------------------------------------------------------------
+# 13. Spread cap check
+# ---------------------------------------------------------------
+check("is_spread_acceptable passes tight spread (3.0% <= 3.5%)",
+      core.is_spread_acceptable(bid=100.0, ask=103.0, ltp=100.0, spread_pct_max=3.5) is True)
+check("is_spread_acceptable blocks wide spread (4.0% > 3.5%)",
+      core.is_spread_acceptable(bid=100.0, ask=104.0, ltp=100.0, spread_pct_max=3.5) is False)
+check("is_spread_acceptable passes any spread when spread_pct_max is None",
+      core.is_spread_acceptable(bid=100.0, ask=110.0, ltp=100.0, spread_pct_max=None) is True)
+
+# ---------------------------------------------------------------
+# 14. Trading window & lunch exclusion pure function
+# ---------------------------------------------------------------
+# Balanced: 09:25 to 14:50 (565 to 890 min), no lunch
+ok_bal_pre, _ = core.is_within_trade_window(560, 565, 890) # 09:20
+check("Balanced window blocks before 09:25", ok_bal_pre is False)
+ok_bal_lunch, _ = core.is_within_trade_window(720, 565, 890) # 12:00
+check("Balanced window allows 12:00 (no lunch gap)", ok_bal_lunch is True)
+ok_bal_post, _ = core.is_within_trade_window(895, 565, 890) # 14:55
+check("Balanced window blocks after 14:50", ok_bal_post is False)
+
+# Scalp: 09:20 to 14:45 (560 to 885 min), lunch 11:30 to 13:30 (690 to 810 min)
+ok_scalp_early, _ = core.is_within_trade_window(562, 560, 885, 690, 810) # 09:22
+check("Scalp window allows 09:22 entry", ok_scalp_early is True)
+ok_scalp_lunch, reason_lunch = core.is_within_trade_window(720, 560, 885, 690, 810) # 12:00
+check("Scalp window blocks during lunch exclusion (12:00)", ok_scalp_lunch is False)
+print("    Scalp lunch exclusion reason:", reason_lunch)
+ok_scalp_afternoon, _ = core.is_within_trade_window(820, 560, 885, 690, 810) # 13:40
+check("Scalp window allows after lunch (13:40)", ok_scalp_afternoon is True)
+ok_scalp_late, _ = core.is_within_trade_window(886, 560, 885, 690, 810) # 14:46
+check("Scalp window blocks after 14:45", ok_scalp_late is False)
+
+# ---------------------------------------------------------------
+# 15. Strategy Profile HTF Veto: Balanced (single 5m) vs Scalp (dual 3m+5m)
+# ---------------------------------------------------------------
+# Setup where technical, momentum, options scores produce a BUY CALL:
+# Case 1: 5-min HTF trend is BEARISH, but 3-min HTF trend is BULLISH.
+sd_bal = core.signal_decision(
+    ts, ms, ops,
+    confidence_threshold=65,
+    min_adx_for_trend_signal=18,
+    require_htf_agreement=True,
+    htf_trend="BEARISH",
+    htf_trend_3m="BULLISH",
+    htf_veto_mode="single_tf",
+)
+check("Balanced profile blocks BUY CALL when 5m is BEARISH alone",
+      sd_bal["signal"] == "WAIT" and "higher-timeframe (5-min) trend" in sd_bal["reason"])
+print("    Balanced veto reason:", sd_bal["reason"])
+
+sd_scalp = core.signal_decision(
+    ts, ms, ops,
+    confidence_threshold=70,
+    min_adx_for_trend_signal=16,
+    require_htf_agreement=True,
+    htf_trend="BEARISH",
+    htf_trend_3m="BULLISH",
+    htf_veto_mode="both_tf",
+)
+check("Scalp profile allows BUY CALL when 5m is BEARISH but 3m is BULLISH (both don't oppose)",
+      sd_scalp["signal"] == "BUY CALL")
+print("    Scalp signal on relaxed HTF:", sd_scalp["signal"], sd_scalp["reason"])
+
+# Case 2: BOTH 5-min and 3-min HTF trends are BEARISH
+sd_scalp_both = core.signal_decision(
+    ts, ms, ops,
+    confidence_threshold=70,
+    min_adx_for_trend_signal=16,
+    require_htf_agreement=True,
+    htf_trend="BEARISH",
+    htf_trend_3m="BEARISH",
+    htf_veto_mode="both_tf",
+)
+check("Scalp profile blocks BUY CALL when BOTH 3m and 5m are BEARISH",
+      sd_scalp_both["signal"] == "WAIT" and "both higher-timeframe" in sd_scalp_both["reason"])
+print("    Scalp dual-HTF veto reason:", sd_scalp_both["reason"])
+
+# Case 3: 3-min higher_timeframe_trend check
+htf_3m = core.higher_timeframe_trend(htf_trend_high, htf_trend_low, htf_trend_close, factor=3)
+check("3-min higher_timeframe_trend runs with factor=3 and reads BULLISH on uptrend", htf_3m == "BULLISH")
+
+# ---------------------------------------------------------------
 print("\n" + "=" * 50)
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

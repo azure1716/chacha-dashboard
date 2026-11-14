@@ -233,6 +233,134 @@ check("get_state_snapshot returns valid dict", isinstance(snapshot, dict))
 check("get_state_snapshot contains spot and atm", "spot" in snapshot and "atm" in snapshot)
 check("get_state_snapshot contains epm dict", "epm" in snapshot and isinstance(snapshot["epm"], dict))
 check("get_state_snapshot has candles list", isinstance(snapshot.get("candles"), list))
+check("get_state_snapshot has strategy_profile", "strategy_profile" in snapshot and snapshot["strategy_profile"]["active"] == "BALANCED")
+
+# ---------------------------------------------------------------
+# 10. Strategy Profile switching and persistence tests
+# ---------------------------------------------------------------
+# 1. Switch to SCALP with no open position succeeds and persists
+switch_res = live.set_strategy_profile("SCALP")
+check("Switching to SCALP succeeds when no position open", switch_res["success"] is True)
+check("ACTIVE_STRATEGY_PROFILE is updated to SCALP", live.ACTIVE_STRATEGY_PROFILE == "SCALP")
+check("CONFIDENCE_THRESHOLD updated to 70", live.CONFIDENCE_THRESHOLD == 70)
+check("MIN_ADX_FOR_TREND_SIGNAL updated to 16", live.MIN_ADX_FOR_TREND_SIGNAL == 16)
+check("HTF_VETO_MODE updated to both_tf", live.HTF_VETO_MODE == "both_tf")
+check("ATR_SL_MULTIPLIER updated to 1.0", live.ATR_SL_MULTIPLIER == 1.0)
+check("ATR_TARGET_MULTIPLIER updated to 2.0", live.ATR_TARGET_MULTIPLIER == 2.0)
+check("TRAIL_ACTIVATE_R updated to 0.8", live.TRAIL_ACTIVATE_R == 0.8)
+check("TRAIL_DISTANCE_R updated to 0.6", live.TRAIL_DISTANCE_R == 0.6)
+check("MAX_TRADES_PER_DAY updated to 8", live.MAX_TRADES_PER_DAY == 8)
+check("IV_PERCENTILE_MAX updated to 75", live.IV_PERCENTILE_MAX == 75)
+check("MAX_SPREAD_PCT updated to 3.5", live.MAX_SPREAD_PCT == 3.5)
+check("VWAP_STRETCH_ATR updated to 2.5", live.VWAP_STRETCH_ATR == 2.5)
+
+# Verify choice is persisted to .env
+root_env_path = os.path.join(os.path.dirname(os.path.abspath(live.__file__)), ".env")
+env_content = ""
+if os.path.exists(root_env_path):
+    with open(root_env_path, "r", encoding="utf-8") as f:
+        env_content = f.read()
+check("STRATEGY_PROFILE=SCALP persisted in .env", "STRATEGY_PROFILE=SCALP" in env_content)
+
+# 2. Switching while paper_trade is open is REJECTED
+live.paper_trade = {"signal": "BUY CALL", "strike": 24500.0, "lots": 2, "entry": 100.0}
+rej_res = live.set_strategy_profile("BALANCED")
+check("Switching while paper_trade is open is rejected", rej_res["success"] is False)
+check("Rejection reason contains open position details",
+      "Cannot switch profile with an open position (BUY CALL 24500.0)" in rej_res.get("reason", ""))
+print("    Rejection message:", rej_res.get("reason"))
+check("Profile remains SCALP after rejection", live.ACTIVE_STRATEGY_PROFILE == "SCALP")
+live.paper_trade = None  # clean up
+
+# 3. signals_log.csv rows after a switch carry the new profile name
+sig_scalp = live.generate_signal(spot=far_spot)
+check("generate_signal result contains strategy_profile='SCALP'", sig_scalp.get("strategy_profile") == "SCALP")
+
+import csv
+with open(live.SIGNALS_LOG_PATH, "r", encoding="utf-8") as f:
+    sig_rows = list(csv.DictReader(f))
+check("Last signals_log.csv row has strategy_profile='SCALP'",
+      len(sig_rows) > 0 and sig_rows[-1].get("strategy_profile") == "SCALP")
+
+# 4. Old-format CSV rows without the strategy_profile column still parse
+from backend.app.api.signals import get_signals_log
+from backend.app.api.trades import _read_trades_rows
+
+# Create a temporary legacy CSV without strategy_profile column
+legacy_sig_path = "legacy_signals_test.csv"
+legacy_headers = ["timestamp", "spot", "signal", "confidence", "reason",
+                  "technical_score", "trend", "trend_strength", "adx",
+                  "momentum_score", "option_score", "option_bias",
+                  "htf_trend", "atr_pct", "epm_score", "epm_bias"]
+with open(legacy_sig_path, "w", newline="", encoding="utf-8") as f:
+    writer = csv.DictWriter(f, fieldnames=legacy_headers)
+    writer.writeheader()
+    writer.writerow({
+        "timestamp": "2026-11-14 10:00:00",
+        "spot": "24300.0",
+        "signal": "BUY CALL",
+        "confidence": "85.0",
+        "reason": "Legacy signal test",
+    })
+
+saved_sig_path = live.SIGNALS_LOG_PATH
+live.SIGNALS_LOG_PATH = legacy_sig_path
+try:
+    parsed_res = get_signals_log()
+    items = parsed_res.get("items", [])
+    check("Legacy signal row without strategy_profile defaults to BALANCED",
+          len(items) > 0 and items[0].get("strategy_profile") == "BALANCED")
+finally:
+    live.SIGNALS_LOG_PATH = saved_sig_path
+    if os.path.exists(legacy_sig_path):
+        os.remove(legacy_sig_path)
+
+# Create a temporary legacy trades CSV without strategy_profile column
+legacy_trade_path = "legacy_trades_test.csv"
+legacy_trade_headers = ["entry_time", "exit_time", "signal", "direction", "strike", "type", "lots",
+                        "entry", "exit", "sl", "target", "atr_used", "option_delta", "confidence",
+                        "iv_percentile_at_entry", "gross_pnl", "cost", "net_pnl", "exit_reason",
+                        "used_ltp_fallback_entry", "used_ltp_fallback_exit"]
+with open(legacy_trade_path, "w", newline="", encoding="utf-8") as f:
+    writer = csv.DictWriter(f, fieldnames=legacy_trade_headers)
+    writer.writeheader()
+    writer.writerow({
+        "entry_time": "10:00:00",
+        "exit_time": "10:05:00",
+        "signal": "BUY CALL",
+        "direction": "CALL",
+        "strike": "24300.0",
+        "net_pnl": "500.0",
+    })
+
+saved_trade_path = live.TRADES_LOG_PATH
+live.TRADES_LOG_PATH = legacy_trade_path
+try:
+    parsed_trades = _read_trades_rows()
+    check("Legacy trade row without strategy_profile defaults to BALANCED",
+          len(parsed_trades) > 0 and parsed_trades[0].get("strategy_profile") == "BALANCED")
+finally:
+    live.TRADES_LOG_PATH = saved_trade_path
+    if os.path.exists(legacy_trade_path):
+        os.remove(legacy_trade_path)
+
+# ---------------------------------------------------------------
+# 11. Differential behavior verification (BALANCED vs SCALP)
+# ---------------------------------------------------------------
+# Verify that switching back to BALANCED restores Balanced parameters
+live.set_strategy_profile("BALANCED")
+check("Switching back to BALANCED sets ACTIVE_STRATEGY_PROFILE to BALANCED", live.ACTIVE_STRATEGY_PROFILE == "BALANCED")
+check("Restored CONFIDENCE_THRESHOLD to 65", live.CONFIDENCE_THRESHOLD == 65)
+check("Restored MIN_ADX_FOR_TREND_SIGNAL to 18", live.MIN_ADX_FOR_TREND_SIGNAL == 18)
+check("Restored HTF_VETO_MODE to single_tf", live.HTF_VETO_MODE == "single_tf")
+check("Restored ATR_SL_MULTIPLIER to 1.2", live.ATR_SL_MULTIPLIER == 1.2)
+check("Restored ATR_TARGET_MULTIPLIER to 2.4", live.ATR_TARGET_MULTIPLIER == 2.4)
+check("Restored TRAIL_ACTIVATE_R to 1.0", live.TRAIL_ACTIVATE_R == 1.0)
+check("Restored TRAIL_DISTANCE_R to 0.8", live.TRAIL_DISTANCE_R == 0.8)
+check("Restored MAX_TRADES_PER_DAY to 6", live.MAX_TRADES_PER_DAY == 6)
+check("Restored IV_PERCENTILE_MAX to 80", live.IV_PERCENTILE_MAX == 80)
+check("Restored MAX_SPREAD_PCT to None", live.MAX_SPREAD_PCT is None)
+check("Restored VWAP_STRETCH_ATR to None", live.VWAP_STRETCH_ATR is None)
 
 # ---------------------------------------------------------------
 print("\n" + "=" * 50)

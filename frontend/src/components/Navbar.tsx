@@ -85,8 +85,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-bold text-base tracking-wide text-white">NIFTY OPTIONS</span>
-                <span className="text-[10px] uppercase font-mono tracking-wider px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/50">
-                  V48 Heuristic
+                <span className="text-[10px] uppercase font-mono tracking-wider px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800/50 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+                  {snapshot?.strategy_profile?.label || (snapshot?.strategy_profile?.active === 'SCALP' ? 'Scalp' : 'Balanced')}
                 </span>
               </div>
               <p className="text-[10px] text-terminal-muted hidden sm:block">Heuristic Directional + Options Pressure Dashboard</p>
@@ -95,6 +96,15 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Status Indicators */}
           <div className="flex items-center gap-2 sm:gap-4">
+            {/* Strategy Profile Badge */}
+            <div className="text-xs px-2.5 py-1 rounded-md border flex items-center gap-1.5 font-medium bg-slate-900/90 text-white border-terminal-border">
+              <SlidersHorizontal className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="hidden sm:inline text-terminal-muted">Profile:</span>
+              <span className="font-mono font-bold text-cyan-300">
+                {snapshot?.strategy_profile?.label || (snapshot?.strategy_profile?.active === 'SCALP' ? 'Scalp' : 'Balanced')}
+              </span>
+            </div>
+
             {/* Market Session */}
             <div className={`text-xs px-2.5 py-1 rounded-md border flex items-center gap-1.5 font-medium ${
               isMarketOpen 
@@ -112,7 +122,9 @@ export const Navbar: React.FC<NavbarProps> = ({
                 ? 'bg-cyan-950/60 text-cyan-400 border-cyan-800/50' 
                 : 'bg-slate-900 text-slate-400 border-slate-800'
             }`}>
-              <span className="hidden lg:inline">Window (09:25–14:50):</span>
+              <span className="hidden lg:inline">
+                Window {snapshot?.strategy_profile?.parameters ? `(${snapshot.strategy_profile.parameters.trade_start_str}–${snapshot.strategy_profile.parameters.trade_end_str}):` : ':'}
+              </span>
               <span className="font-mono">{isTradeWindow ? 'ACTIVE' : 'IDLE'}</span>
             </div>
 

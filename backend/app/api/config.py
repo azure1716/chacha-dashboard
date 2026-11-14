@@ -77,6 +77,7 @@ def get_system_config():
             "strategy_edge": "STATUS OF THE STRATEGY (from nifty_algo.py header): 1-minute EMA/RSI/ADX logic showed NO edge after costs on ~90 days of data. Real orders are NOT implemented; live is paper trading only.",
             "paper_only": "PAPER TRADING ONLY — no real orders are placed by this system.",
         },
+        "strategy_profile": live.get_active_strategy_profile(),
         "recent_exceptions": live.get_recent_exceptions(),
     }
 
@@ -100,6 +101,32 @@ def _update_env_file(key: str, value: str, filepath: str) -> None:
         new_lines.append(f"{key}={value}\n")
     with open(filepath, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
+
+
+class StrategyProfilePayload(BaseModel):
+    profile: str
+
+
+@router.post("/config/strategy-profile")
+def update_strategy_profile(payload: StrategyProfilePayload):
+    profile_name = (payload.profile or "").strip().upper()
+    if not profile_name:
+        raise HTTPException(status_code=400, detail="Profile name cannot be empty.")
+
+    result = live.set_strategy_profile(profile_name)
+    if not result.get("success", False):
+        return {
+            "success": False,
+            "error": result.get("reason", "Failed to switch strategy profile."),
+            "reason": result.get("reason", "Failed to switch strategy profile."),
+            "message": result.get("reason", "Failed to switch strategy profile."),
+        }
+
+    return {
+        "success": True,
+        "profile": result.get("profile"),
+        "message": result.get("message", f"Strategy profile switched to {result.get('profile')} successfully."),
+    }
 
 
 class TokenPayload(BaseModel):

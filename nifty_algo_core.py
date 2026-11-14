@@ -41,6 +41,33 @@ def calculate_ema(values, length):
     return result
 
 
+def calculate_vwap(highs, lows, closes, volumes):
+    """
+    Cumulative session Volume-Weighted Average Price (VWAP).
+    Typical Price = (High + Low + Close) / 3.0
+    VWAP = sum(Typical Price * Volume) / sum(Volume)
+    Returns None if empty, mismatched series lengths, or total volume <= 0.
+    """
+    if not closes:
+        return None
+    n = len(closes)
+    if len(highs) < n or len(lows) < n or len(volumes) < n:
+        return None
+    highs, lows, closes, volumes = list(highs), list(lows), list(closes), list(volumes)
+    cum_tp_vol = 0.0
+    cum_vol = 0.0
+    for h, l, c, v in zip(highs, lows, closes, volumes):
+        v_num = float(v) if v is not None else 0.0
+        if v_num < 0:
+            v_num = 0.0
+        tp = (float(h) + float(l) + float(c)) / 3.0
+        cum_tp_vol += tp * v_num
+        cum_vol += v_num
+    if cum_vol <= 0:
+        return None
+    return cum_tp_vol / cum_vol
+
+
 def calculate_rsi(values, length):
     if len(values) < length + 1:
         return None
@@ -406,14 +433,65 @@ def validate_signal_consistency(signal, technical_score_value, momentum_score_va
     return True, "SIGNAL CONSISTENT"
 
 
+def is_spread_acceptable(bid, ask, ltp=None, spread_pct_max=None):
+    """
+    Pure liquidity check: returns whether an option's quoted bid/ask spread passes
+    the maximum allowed spread percentage:
+    spread_pct = (ask - bid) / ref_price * 100.0 <= spread_pct_max
+    If spread_pct_max is None or <= 0, the check is disabled (returns True).
+    If bid <= 0 or ask <= 0, or reference price <= 0, returns True.
+    """
+    if spread_pct_max is None or spread_pct_max <= 0:
+        return True
+    if bid is None or ask is None or bid <= 0 or ask <= 0:
+        return True
+    ref = ltp if (ltp is not None and ltp > 0) else ((bid + ask) / 2.0)
+    if ref <= 0:
+        return True
+    spread_pct = (ask - bid) / ref * 100.0
+    return spread_pct <= spread_pct_max
+
+
+def check_vwap_stretch(spot, vwap, atr, vwap_stretch_atr=2.5):
+    """
+    Checks whether spot has stretched excessively far from session VWAP:
+    |spot - vwap| > atr * vwap_stretch_atr.
+    Returns (is_stretched: bool, diff: float).
+    """
+    if spot is None or vwap is None or atr is None or atr <= 0 or vwap_stretch_atr is None:
+        return False, 0.0
+    diff = abs(spot - vwap)
+    max_stretch = atr * vwap_stretch_atr
+    return diff > max_stretch, diff
+
+
+def is_within_trade_window(minutes, trade_start_minutes, trade_end_minutes,
+                           lunch_start_minutes=None, lunch_end_minutes=None):
+    """
+    Pure schedule gate: checks if current time in minutes-since-midnight is within
+    the trading window and outside the lunch-hour exclusion window.
+    Returns (allowed: bool, reason: str).
+    """
+    if minutes < trade_start_minutes or minutes > trade_end_minutes:
+        return False, f"Outside trading window ({trade_start_minutes//60:02d}:{trade_start_minutes%60:02d}-{trade_end_minutes//60:02d}:{trade_end_minutes%60:02d})"
+    if lunch_start_minutes is not None and lunch_end_minutes is not None:
+        if lunch_start_minutes <= minutes <= lunch_end_minutes:
+            return False, f"Lunch-hour exclusion ({lunch_start_minutes//60:02d}:{lunch_start_minutes%60:02d}-{lunch_end_minutes//60:02d}:{lunch_end_minutes%60:02d})"
+    return True, "OK"
+
+
 def signal_decision(technical, momentum, options, min_direction_score=30,
                      confidence_threshold=75, min_adx_for_trend_signal=18,
-                     require_htf_agreement=True, htf_trend="NEUTRAL", epm=None):
+                     require_htf_agreement=True, htf_trend="NEUTRAL", epm=None,
+                     htf_trend_3m=None, htf_veto_mode="single_tf"):
     """
     Pure decision layer. Liveness/readiness checks (websocket connected,
     warmup elapsed, etc.) stay in the live engine since those depend on
     live process state -- this function only needs the three score dicts.
     epm: optional EPM score dict used as a confirming factor.
+    htf_trend_3m: optional 3-min HTF trend read.
+    htf_veto_mode: "single_tf" (default, BALANCED veto on 5-min alone) or
+                   "both_tf" (SCALP relaxed veto, blocks only if both 3m and 5m oppose).
     """
     if not technical.get("ready"):
         return {"signal": "WAIT", "confidence": 0.0, "reason": "Technical history not ready", "epm": epm}
@@ -473,11 +551,18 @@ def signal_decision(technical, momentum, options, min_direction_score=30,
         signal, reason = "WAIT", f"Confidence {confidence:.0f}% < {confidence_threshold}% (direction: {direction_score:+.1f})"
 
     # --- Higher-timeframe agreement gate ----------------------------
-    if require_htf_agreement and signal != "WAIT" and htf_trend != "NEUTRAL":
-        if signal == "BUY CALL" and htf_trend == "BEARISH":
-            signal, reason = "WAIT", "Blocked: against higher-timeframe (5-min) trend"
-        elif signal == "BUY PUT" and htf_trend == "BULLISH":
-            signal, reason = "WAIT", "Blocked: against higher-timeframe (5-min) trend"
+    if require_htf_agreement and signal != "WAIT":
+        if htf_veto_mode == "both_tf":
+            if signal == "BUY CALL" and htf_trend == "BEARISH" and htf_trend_3m == "BEARISH":
+                signal, reason = "WAIT", "Blocked: against both higher-timeframe (3-min and 5-min) trends"
+            elif signal == "BUY PUT" and htf_trend == "BULLISH" and htf_trend_3m == "BULLISH":
+                signal, reason = "WAIT", "Blocked: against both higher-timeframe (3-min and 5-min) trends"
+        else:
+            if htf_trend != "NEUTRAL":
+                if signal == "BUY CALL" and htf_trend == "BEARISH":
+                    signal, reason = "WAIT", "Blocked: against higher-timeframe (5-min) trend"
+                elif signal == "BUY PUT" and htf_trend == "BULLISH":
+                    signal, reason = "WAIT", "Blocked: against higher-timeframe (5-min) trend"
 
     if signal != "WAIT":
         ok, why = validate_signal_consistency(signal, technical_s, momentum_s, option_s)

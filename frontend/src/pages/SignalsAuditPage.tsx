@@ -93,6 +93,7 @@ export const SignalsAuditPage: React.FC = () => {
             <thead className="bg-terminal-surface text-terminal-muted border-b border-terminal-border/60">
               <tr>
                 <th className="p-3">Timestamp (IST)</th>
+                <th className="p-3">Profile</th>
                 <th className="p-3 text-right">Spot</th>
                 <th className="p-3">Signal</th>
                 <th className="p-3 text-right">Conf.</th>
@@ -109,13 +110,13 @@ export const SignalsAuditPage: React.FC = () => {
             <tbody className="divide-y divide-terminal-border/40">
               {loading ? (
                 <tr>
-                  <td colSpan={12} className="p-8 text-center text-terminal-muted">
+                  <td colSpan={13} className="p-8 text-center text-terminal-muted">
                     Loading tick signals from signals_log.csv...
                   </td>
                 </tr>
               ) : signals.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="p-8 text-center text-terminal-muted">
+                  <td colSpan={13} className="p-8 text-center text-terminal-muted">
                     No signals found matching the current filter.
                   </td>
                 </tr>
@@ -129,6 +130,16 @@ export const SignalsAuditPage: React.FC = () => {
                     <tr key={idx} className="hover:bg-terminal-hover/40 transition-colors">
                       <td className="p-3 whitespace-nowrap text-terminal-subtext">
                         {s.timestamp}
+                      </td>
+
+                      <td className="p-3 whitespace-nowrap">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                          (s.strategy_profile || 'BALANCED').toUpperCase() === 'SCALP'
+                            ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60'
+                            : 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60'
+                        }`}>
+                          {(s.strategy_profile || 'BALANCED').toUpperCase() === 'SCALP' ? 'Scalp' : 'Balanced'}
+                        </span>
                       </td>
 
                       <td className="p-3 whitespace-nowrap text-right font-bold text-white">
@@ -251,6 +262,12 @@ export const SignalsAuditPage: React.FC = () => {
             </div>
 
             <div className="space-y-2 text-xs font-mono">
+              <div className="flex justify-between py-1 border-b border-terminal-border/40">
+                <span className="text-terminal-muted">Strategy Profile:</span>
+                <span className="font-bold text-cyan-300">
+                  {(selectedRow.strategy_profile || 'BALANCED').toUpperCase() === 'SCALP' ? 'Scalp' : 'Balanced'}
+                </span>
+              </div>
               <div className="flex justify-between py-1 border-b border-terminal-border/40">
                 <span className="text-terminal-muted">Signal / Confidence:</span>
                 <span className="font-bold text-white">{selectedRow.signal} ({selectedRow.confidence}%)</span>

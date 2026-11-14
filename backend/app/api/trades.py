@@ -19,6 +19,8 @@ def _read_trades_rows():
         with open(csv_path, mode="r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
+                if not row.get("strategy_profile"):
+                    row["strategy_profile"] = "BALANCED"
                 rows.append(row)
     except Exception:
         return []

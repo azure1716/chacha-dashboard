@@ -20,6 +20,17 @@ def get_signals_log(
     Paginated audit log of every engine tick from signals_log.csv.
     """
     csv_path = live.SIGNALS_LOG_PATH
+    if hasattr(from_date, "default"):
+        from_date = None
+    if hasattr(to_date, "default"):
+        to_date = None
+    if hasattr(signal, "default"):
+        signal = None
+    if hasattr(page, "default"):
+        page = 1
+    if hasattr(page_size, "default"):
+        page_size = 50
+
     if not os.path.exists(csv_path):
         return {
             "total": 0,
@@ -46,6 +57,9 @@ def get_signals_log(
                 sig = row.get("signal", "")
                 if signal and signal.upper() != "ALL" and sig.upper() != signal.upper():
                     continue
+
+                if not row.get("strategy_profile"):
+                    row["strategy_profile"] = "BALANCED"
 
                 rows.append(row)
     except Exception as e:
