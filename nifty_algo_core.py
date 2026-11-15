@@ -68,6 +68,31 @@ def calculate_vwap(highs, lows, closes, volumes):
     return cum_tp_vol / cum_vol
 
 
+def calculate_session_vwap(highs, lows, closes, volumes=None, use_volume=False):
+    """
+    Calculates session VWAP over supplied intraday session candles.
+    If use_volume=True and volumes is provided with positive total volume,
+    calculates volume-weighted average price.
+    Otherwise falls back to TWAP (simple average of typical price),
+    which is essential for NIFTY index candles where volume is often 0 or unavailable.
+    """
+    n = len(closes) if closes is not None else 0
+    if n == 0:
+        return None
+    highs = list(highs)
+    lows = list(lows)
+    closes = list(closes)
+    if len(highs) < n or len(lows) < n:
+        return None
+    tps = [(float(highs[i]) + float(lows[i]) + float(closes[i])) / 3.0 for i in range(n)]
+    if use_volume and volumes is not None:
+        vols = list(volumes)
+        if len(vols) == n and sum(vols) > 0:
+            total_vol = float(sum(vols))
+            return sum(tps[i] * float(vols[i]) for i in range(n)) / total_vol
+    return sum(tps) / n
+
+
 def calculate_rsi(values, length):
     if len(values) < length + 1:
         return None
@@ -312,24 +337,37 @@ def momentum_score(closes, rsi_length=14, lookback=10):
 def option_pressure_score(ce_oi, pe_oi, ce_volume, pe_volume,
                            ce_buy, pe_buy, ce_sell, pe_sell,
                            ce_price_change, pe_price_change,
-                           weights=(0.25, 0.15, 0.25, 0.35)):
+                           weights=(0.25, 0.15, 0.25, 0.35),
+                           ce_oi_change=None, pe_oi_change=None,
+                           oi_change_full_qty=5000):
     """
     weights = (oi_weight, volume_weight, order_weight, price_weight)
-    Same aggregate-pressure math as V47.2's option_pressure(), pulled out
-    as a pure function so it's testable and reusable in a backtest that
-    has historical OI/volume snapshots.
+    Calculates aggregate option pressure.
+    Rationale:
+    Rising CE bid-side quantity or CE premium = bullish signal (+);
+    rising PE bid-side quantity or PE premium = bearish signal (-).
+    Higher PE open interest than CE OI = put support / bullish PCR bias.
+    Optional intraday OI-change weighting blends 50/50 with absolute OI
+    when ce_oi_change and pe_oi_change are provided.
     """
     oi_w, vol_w, ord_w, price_w = weights
     total_oi = ce_oi + pe_oi
     oi_score = ((pe_oi - ce_oi) / total_oi * 100) if total_oi > 0 else 0
 
+    if ce_oi_change is not None and pe_oi_change is not None:
+        total_change = abs(ce_oi_change) + abs(pe_oi_change)
+        if total_change > 0:
+            change_score = (pe_oi_change - ce_oi_change) / total_change * 100
+            change_score *= min(1.0, total_change / oi_change_full_qty)
+            oi_score = 0.5 * oi_score + 0.5 * change_score
+
     total_volume = ce_volume + pe_volume
     volume_score = ((pe_volume - ce_volume) / total_volume * 100) if total_volume > 0 else 0
 
     total_order = ce_buy + pe_buy + ce_sell + pe_sell
-    order_score = ((pe_buy + ce_sell - ce_buy - pe_sell) / total_order * 100) if total_order > 0 else 0
+    order_score = ((ce_buy + pe_sell - pe_buy - ce_sell) / total_order * 100) if total_order > 0 else 0
 
-    price_score = max(-100, min(100, pe_price_change - ce_price_change))
+    price_score = max(-100, min(100, ce_price_change - pe_price_change))
 
     score = oi_score * oi_w + volume_score * vol_w + order_score * ord_w + price_score * price_w
 
@@ -344,6 +382,7 @@ def option_pressure_score(ce_oi, pe_oi, ce_volume, pe_volume,
         "score": score, "bias": bias,
         "oi_score": oi_score, "volume_score": volume_score,
         "order_score": order_score, "price_score": price_score,
+        "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change,
     }
 
 

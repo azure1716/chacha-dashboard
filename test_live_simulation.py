@@ -17,6 +17,7 @@ def check(name, cond, extra=""):
 
 # Deterministic: don't depend on the sandbox's actual wall-clock day/time.
 live.is_trade_time = lambda: True
+live.set_strategy_profile("BALANCED")
 
 # Clean up any CSVs from a previous run so counts below are meaningful.
 for p in (live.SIGNALS_LOG_PATH, live.TRADES_LOG_PATH):
@@ -361,6 +362,154 @@ check("Restored MAX_TRADES_PER_DAY to 6", live.MAX_TRADES_PER_DAY == 6)
 check("Restored IV_PERCENTILE_MAX to 80", live.IV_PERCENTILE_MAX == 80)
 check("Restored MAX_SPREAD_PCT to None", live.MAX_SPREAD_PCT is None)
 check("Restored VWAP_STRETCH_ATR to None", live.VWAP_STRETCH_ATR is None)
+
+# ---------------------------------------------------------------
+# 12. Snapshot consistency (get_indicator_series called once per cycle)
+# ---------------------------------------------------------------
+orig_get_series = live.get_indicator_series
+call_counts = {"count": 0}
+
+def counted_get_series():
+    call_counts["count"] += 1
+    return orig_get_series()
+
+live.get_indicator_series = counted_get_series
+
+# BALANCED profile
+live.set_strategy_profile("BALANCED")
+call_counts["count"] = 0
+live.generate_signal(spot=spot)
+check("Single snapshot consistency: get_indicator_series called once for BALANCED", call_counts["count"] == 1)
+
+# SCALP profile
+live.set_strategy_profile("SCALP")
+call_counts["count"] = 0
+live.generate_signal(spot=spot)
+check("Single snapshot consistency: get_indicator_series called once for SCALP", call_counts["count"] == 1)
+
+live.get_indicator_series = orig_get_series
+
+# ---------------------------------------------------------------
+# 13. Host OS timezone invariance (Regression test for Bug #3)
+# ---------------------------------------------------------------
+# When host is in UTC-8 (e.g. US Pacific, 13.5 hours behind IST),
+# get_ist_now() must still produce the correct IST calendar day and minute
+import datetime
+from unittest.mock import patch
+
+fixed_utc = datetime.datetime(2026, 11, 15, 9, 45, 0, tzinfo=datetime.timezone.utc)
+
+class MockDateTime(datetime.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        if tz is not None:
+            return fixed_utc.astimezone(tz)
+        host_tz = datetime.timezone(datetime.timedelta(hours=-8))
+        return fixed_utc.astimezone(host_tz).replace(tzinfo=None)
+
+with patch("datetime.datetime", MockDateTime):
+    ist_time = live.get_ist_now()
+    check("Timezone invariance: get_ist_now() returns 15:15 IST when UTC is 09:45",
+          ist_time.hour == 15 and ist_time.minute == 15 and ist_time.day == 15)
+    scalp_sq_min = live.STRATEGY_PROFILES["SCALP"]["square_off_minutes"]
+    current_ist_min = ist_time.hour * 60 + ist_time.minute
+    check("Timezone invariance: Scalp square-off minute matches IST time (915)",
+          current_ist_min == scalp_sq_min)
+
+# ---------------------------------------------------------------
+# 14. Deterministic Risk Scenarios (SCALP profile)
+# ---------------------------------------------------------------
+live.set_strategy_profile("SCALP")
+option_key = live.selected_strikes[0]["key"]
+
+# A. TIME STOP SCENARIO
+# Scalp open >= 12 min and profit < 0.3 * risk -> "TIME STOP"
+mock_now = 1_700_000_000.0
+live.paper_trade = {
+    "signal": "BUY CALL", "direction": "CALL", "strike": 24400.0, "type": "CE", "key": option_key,
+    "entry": 100.0, "sl": 90.0, "target": 120.0, "sl_initial": 90.0, "risk": 10.0,
+    "atr_used": 10.0, "option_delta": 0.5, "lots": 2, "highest": 100.0, "trail_active": False,
+    "confidence": 75.0, "iv_percentile_at_entry": 50.0, "used_ltp_fallback_entry": False,
+    "entry_time": "10:00:00",
+    "entry_timestamp": mock_now - (13 * 60),  # 13 minutes ago (> 12 min)
+    "strategy_profile": "SCALP",
+}
+live.live_data[option_key]["ltp"] = 101.5  # profit 1.5 < 0.3 * 10 = 3.0
+live.live_data[option_key]["bid"] = 101.0
+live.live_data[option_key]["ask"] = 102.0
+
+ist_1013 = datetime.datetime(2026, 11, 15, 10, 13, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+with patch("time.time", return_value=mock_now):
+    with patch("nifty_algo_live.get_ist_now", return_value=ist_1013):
+        with patch("nifty_algo_live.nse_market_open_now", return_value=True):
+            live.paper_trade_engine({"signal": "BUY CALL", "confidence": 75.0}, spot, {"ready": True})
+
+check("Time Stop triggered for Scalp after 13 mins with small profit",
+      live.paper_trade is None and len(live.paper_trades) > 0 and live.paper_trades[-1]["exit_reason"] == "TIME STOP")
+if live.paper_trades and live.paper_trades[-1]["exit_reason"] == "TIME STOP":
+    rec = live.paper_trades[-1]
+    check("Time Stop trade record contains held_seconds and sl_initial",
+          rec.get("held_seconds") is not None and rec.get("sl_initial") == 90.0)
+
+# B. SQUARE OFF SCENARIO
+# Scalp open at 15:16 IST -> "SQUARE OFF"
+live.paper_trade = {
+    "signal": "BUY CALL", "direction": "CALL", "strike": 24400.0, "type": "CE", "key": option_key,
+    "entry": 100.0, "sl": 90.0, "target": 120.0, "sl_initial": 90.0, "risk": 10.0,
+    "atr_used": 10.0, "option_delta": 0.5, "lots": 2, "highest": 100.0, "trail_active": False,
+    "confidence": 75.0, "iv_percentile_at_entry": 50.0, "used_ltp_fallback_entry": False,
+    "entry_time": "15:00:00",
+    "entry_timestamp": mock_now,
+    "strategy_profile": "SCALP",
+}
+sq_ist = datetime.datetime(2026, 11, 15, 15, 16, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+with patch("time.time", return_value=mock_now + 60):
+    with patch("nifty_algo_live.get_ist_now", return_value=sq_ist):
+        with patch("nifty_algo_live.nse_market_open_now", return_value=True):
+            live.paper_trade_engine({"signal": "BUY CALL", "confidence": 75.0}, spot, {"ready": True})
+
+check("Square Off triggered for Scalp at 15:16 IST",
+      live.paper_trade is None and live.paper_trades[-1]["exit_reason"] == "SQUARE OFF")
+
+# C. RE-ENTRY COOLDOWN + ANTI-WHIPSAW SCENARIO
+live.scalp_last_closed_signal = "BUY CALL"
+live.scalp_reentry_cooldown_until = mock_now + 180.0
+live.scalp_reentry_armed = False
+
+# While in cooldown:
+with patch("time.time", return_value=mock_now + 60.0):
+    tr, reas = live.open_paper_trade("BUY CALL", 75.0, spot, {"ready": True, "atr": 10.0})
+    check("Re-entry cooldown blocks new trade during 180s cooldown", tr is None and "Re-entry cooldown active" in reas)
+
+# After cooldown has elapsed, but signal never changed away (anti-whipsaw):
+with patch("time.time", return_value=mock_now + 200.0):
+    tr, reas = live.open_paper_trade("BUY CALL", 75.0, spot, {"ready": True, "atr": 10.0})
+    check("Anti-whipsaw blocks immediate re-entry into same direction", tr is None and "Anti-whipsaw" in reas)
+
+# Feed a WAIT signal to re-arm:
+with patch("time.time", return_value=mock_now + 210.0):
+    live.paper_trade_engine({"signal": "WAIT", "confidence": 0.0}, spot, {"ready": True})
+    check("Anti-whipsaw re-arms when signal transitions to WAIT", live.scalp_reentry_armed is True)
+
+# D. EXPIRY-DAY HANDLING SCENARIO
+# Set selected_expiry to today
+live.selected_expiry = live.today_string()
+# Confidence requirement: threshold (70) + bonus (5) = 75
+with patch("time.time", return_value=mock_now + 300.0):
+    # Confidence 72 < 75 -> blocked
+    tr, reas = live.open_paper_trade("BUY CALL", 72.0, spot, {"ready": True, "atr": 10.0})
+    check("Expiry-day filter blocks trade when confidence < 75", tr is None and "Expiry day confidence" in reas)
+
+    # Confidence 78 >= 75 -> succeeds with lots scaled by 0.5
+    tr, reas = live.open_paper_trade("BUY CALL", 78.0, spot, {"ready": True, "atr": 10.0})
+    check("Expiry-day trade opens when confidence >= 75", tr is not None and reas == "OPENED")
+    if tr:
+        check("Expiry-day trade sizes with EXPIRY_DAY_SIZE_FACTOR (>= 1 lot)", tr["lots"] >= 1)
+        live.paper_trade = None  # clean up
+
+# Reset selected_expiry and return to BALANCED
+live.selected_expiry = None
+live.set_strategy_profile("BALANCED")
 
 # ---------------------------------------------------------------
 print("\n" + "=" * 50)

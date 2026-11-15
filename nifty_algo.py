@@ -1895,7 +1895,7 @@ def display():
     safe_print("TRADE WINDOW       :", "YES" if is_trade_time() else "NO")
     safe_print("WS SUBSCRIBED      :", "YES" if ws_subscribed else "NO")
     safe_print("======================================================")
-    safe_print("V48 IMPROVED SEMI-ALGO (ADX + HTF + IV + RISK LAYER)")
+    safe_print("CHACHA ENGINE (ADX + HTF + IV + RISK LAYER)")
     safe_print("======================================================")
     safe_print("NIFTY             :", round(spot, 2), "| ATM:", last_atm_used)
     safe_print("WEBSOCKET         :", "CONNECTED" if ws_connected else "DISCONNECTED")
@@ -1963,7 +1963,7 @@ def cmd_live():
     import upstox_client
 
     safe_print("\n==============================================")
-    safe_print("V48 IMPROVED SEMI-ALGO")
+    safe_print("CHACHA TRADING ENGINE")
     safe_print("ADX chop filter + 5-min HTF confirm + IV filter + risk layer")
     safe_print("==============================================")
     safe_print("REAL ORDER:", REAL_ORDER)
@@ -2047,7 +2047,7 @@ def cmd_live():
         while running:
             time.sleep(1)
     except KeyboardInterrupt:
-        safe_print("\nStopping V48...")
+        safe_print("\nStopping engine...")
         running = False
 
 

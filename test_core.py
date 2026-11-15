@@ -84,15 +84,25 @@ ms = core.momentum_score(trend_close)
 check("momentum_score positive on uptrend", ms["score"] > 0)
 
 # ---------------------------------------------------------------
-# 5. option_pressure_score
+# 5. option_pressure_score (sign convention: CE buying is bullish, PE buying is bearish)
 # ---------------------------------------------------------------
-ops = core.option_pressure_score(
-    ce_oi=50000, pe_oi=200000, ce_volume=2000, pe_volume=12000,
+ops_bullish = core.option_pressure_score(
+    ce_oi=50000, pe_oi=200000, ce_volume=12000, pe_volume=2000,
+    ce_buy=6000, pe_buy=1000, ce_sell=500, pe_sell=5000,
+    ce_price_change=10, pe_price_change=-5,
+)
+print("    option_pressure_score (CE-dominant buying):", round(ops_bullish["score"], 2), ops_bullish["bias"])
+check("option_pressure positive and bullish when CE buying dominant", ops_bullish["score"] > 0 and ops_bullish["bias"] == "BULLISH")
+
+ops_bearish = core.option_pressure_score(
+    ce_oi=200000, pe_oi=50000, ce_volume=2000, pe_volume=12000,
     ce_buy=1000, pe_buy=6000, ce_sell=5000, pe_sell=500,
     ce_price_change=-5, pe_price_change=10,
 )
-print("    option_pressure_score (strong PE skew):", round(ops["score"], 2), ops["bias"])
-check("option_pressure bullish when PE side heavily heavier", ops["bias"] == "BULLISH")
+print("    option_pressure_score (PE-dominant buying):", round(ops_bearish["score"], 2), ops_bearish["bias"])
+check("option_pressure negative and bearish when PE buying dominant", ops_bearish["score"] < 0 and ops_bearish["bias"] == "BEARISH")
+
+ops = ops_bullish
 
 # ---------------------------------------------------------------
 # 6. signal_decision end-to-end (should not blow up, should WAIT
@@ -282,6 +292,60 @@ print("    Scalp dual-HTF veto reason:", sd_scalp_both["reason"])
 # Case 3: 3-min higher_timeframe_trend check
 htf_3m = core.higher_timeframe_trend(htf_trend_high, htf_trend_low, htf_trend_close, factor=3)
 check("3-min higher_timeframe_trend runs with factor=3 and reads BULLISH on uptrend", htf_3m == "BULLISH")
+
+# ---------------------------------------------------------------
+# 16. calculate_session_vwap (TWAP & Volume-weighted & Zero-vol fallback)
+# ---------------------------------------------------------------
+h_synth = [110.0, 120.0]
+l_synth = [90.0, 100.0]
+c_synth = [100.0, 110.0]
+# TP1 = (110+90+100)/3 = 100.0; TP2 = (120+100+110)/3 = 110.0
+# TWAP = (100.0 + 110.0) / 2 = 105.0
+
+twap_val = core.calculate_session_vwap(h_synth, l_synth, c_synth, use_volume=False)
+check("calculate_session_vwap TWAP mode equals 105.0", abs(twap_val - 105.0) < 1e-6)
+
+v_synth = [100.0, 300.0]
+# VWAP = (100*100 + 110*300) / 400 = 43000 / 400 = 107.5
+vwap_vol_val = core.calculate_session_vwap(h_synth, l_synth, c_synth, volumes=v_synth, use_volume=True)
+check("calculate_session_vwap volume-weighted equals 107.5", abs(vwap_vol_val - 107.5) < 1e-6)
+
+# Zero volume fallback to TWAP
+v_zeros = [0.0, 0.0]
+vwap_zero_val = core.calculate_session_vwap(h_synth, l_synth, c_synth, volumes=v_zeros, use_volume=True)
+check("calculate_session_vwap zero volume falls back to TWAP (105.0)", abs(vwap_zero_val - 105.0) < 1e-6)
+
+check("calculate_session_vwap returns None on empty series", core.calculate_session_vwap([], [], []) is None)
+
+# ---------------------------------------------------------------
+# 17. OI-change blending and damping in option_pressure_score
+# ---------------------------------------------------------------
+# Equal baseline OI -> abs_oi_score == 0
+# Full change (10,000 >= full_qty 5000) -> damping factor = 1.0, change_score = 100, blended = 50.0
+ops_full_change = core.option_pressure_score(
+    ce_oi=100000, pe_oi=100000, ce_volume=5000, pe_volume=5000,
+    ce_buy=1000, pe_buy=1000, ce_sell=1000, pe_sell=1000,
+    ce_price_change=0, pe_price_change=0,
+    ce_oi_change=0, pe_oi_change=10000, oi_change_full_qty=5000,
+)
+check("OI-change blending full magnitude blends 50/50 (oi_score == 50.0)", abs(ops_full_change["oi_score"] - 50.0) < 1e-6)
+
+# Half change (2,500 == 0.5 * full_qty 5000) -> damping factor = 0.5, change_score = 50, blended = 25.0
+ops_half_change = core.option_pressure_score(
+    ce_oi=100000, pe_oi=100000, ce_volume=5000, pe_volume=5000,
+    ce_buy=1000, pe_buy=1000, ce_sell=1000, pe_sell=1000,
+    ce_price_change=0, pe_price_change=0,
+    ce_oi_change=0, pe_oi_change=2500, oi_change_full_qty=5000,
+)
+check("OI-change blending small magnitude damps correctly (oi_score == 25.0)", abs(ops_half_change["oi_score"] - 25.0) < 1e-6)
+
+# Unspecified OI change leaves abs_oi_score unaffected
+ops_no_change = core.option_pressure_score(
+    ce_oi=100000, pe_oi=100000, ce_volume=5000, pe_volume=5000,
+    ce_buy=1000, pe_buy=1000, ce_sell=1000, pe_sell=1000,
+    ce_price_change=0, pe_price_change=0,
+)
+check("OI score unaffected when oi_change is None (oi_score == 0.0)", abs(ops_no_change["oi_score"] - 0.0) < 1e-6)
 
 # ---------------------------------------------------------------
 print("\n" + "=" * 50)

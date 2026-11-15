@@ -1,5 +1,5 @@
 # ============================================================
-# V48 - LIVE / PAPER-TRADING ENGINE
+# LIVE / PAPER-TRADING ENGINE
 # Builds on V47.2's plumbing (WebSocket handling, candle
 # reconstruction, gap detection, reconnection) which was solid.
 # ============================================================
@@ -51,6 +51,7 @@
 # ============================================================
 
 import csv
+import datetime
 import os
 import threading
 import time
@@ -120,6 +121,14 @@ STRATEGY_PROFILES = {
         "lunch_end_minutes": None,
         "lunch_start_str": None,
         "lunch_end_str": None,
+        "time_stop_minutes": None,
+        "time_stop_min_r": None,
+        "square_off_minutes": None,
+        "reentry_cooldown_seconds": 0,
+        "expiry_day_conf_bonus": 0,
+        "expiry_day_size_factor": 1.0,
+        "vwap_use_volume": False,
+        "signals_log_interval_seconds": 60,
     },
     "SCALP": {
         "name": "SCALP",
@@ -144,6 +153,14 @@ STRATEGY_PROFILES = {
         "lunch_end_minutes": 13 * 60 + 30,   # 810 (13:30)
         "lunch_start_str": "11:30",
         "lunch_end_str": "13:30",
+        "time_stop_minutes": 12,
+        "time_stop_min_r": 0.3,
+        "square_off_minutes": 15 * 60 + 15,  # 915 (15:15 IST)
+        "reentry_cooldown_seconds": 180,
+        "expiry_day_conf_bonus": 5,
+        "expiry_day_size_factor": 0.5,
+        "vwap_use_volume": False,
+        "signals_log_interval_seconds": 60,
     },
 }
 
@@ -183,6 +200,25 @@ LUNCH_START_STR = _init_profile["lunch_start_str"]
 LUNCH_END_STR = _init_profile["lunch_end_str"]
 
 MAX_TRADES_PER_DAY = _init_profile["max_trades_per_day"]
+
+TIME_STOP_MINUTES = _init_profile["time_stop_minutes"]
+TIME_STOP_MIN_R = _init_profile["time_stop_min_r"]
+SQUARE_OFF_MINUTES = _init_profile["square_off_minutes"]
+REENTRY_COOLDOWN_SECONDS = _init_profile["reentry_cooldown_seconds"]
+EXPIRY_DAY_CONF_BONUS = _init_profile["expiry_day_conf_bonus"]
+EXPIRY_DAY_SIZE_FACTOR = _init_profile["expiry_day_size_factor"]
+VWAP_USE_VOLUME = _init_profile["vwap_use_volume"]
+SIGNALS_LOG_INTERVAL_SECONDS = _init_profile["signals_log_interval_seconds"]
+
+scalp_reentry_cooldown_until = 0.0
+scalp_last_closed_signal = None
+scalp_reentry_armed = True
+
+_last_logged_signal_key = None
+_last_logged_signal_time = 0.0
+
+LAST_INTRADAY_REFRESH_TIME = 0.0
+INTRADAY_REFRESH_COOLDOWN = 15.0
 
 # --- Risk management (V47.2 had none of this) ------------------
 CAPITAL = 100000.0          # << SET THIS to your actual paper/real capital
@@ -254,6 +290,9 @@ def _apply_strategy_profile(name: str):
     global IV_PERCENTILE_MAX, MAX_SPREAD_PCT, VWAP_STRETCH_ATR
     global TRADE_START_MINUTES, TRADE_END_MINUTES, TRADE_START_STR, TRADE_END_STR
     global LUNCH_START_MINUTES, LUNCH_END_MINUTES, LUNCH_START_STR, LUNCH_END_STR
+    global TIME_STOP_MINUTES, TIME_STOP_MIN_R, SQUARE_OFF_MINUTES
+    global REENTRY_COOLDOWN_SECONDS, EXPIRY_DAY_CONF_BONUS, EXPIRY_DAY_SIZE_FACTOR
+    global VWAP_USE_VOLUME, SIGNALS_LOG_INTERVAL_SECONDS
 
     p = STRATEGY_PROFILES[name]
     ACTIVE_STRATEGY_PROFILE = name
@@ -276,6 +315,14 @@ def _apply_strategy_profile(name: str):
     LUNCH_END_MINUTES = p["lunch_end_minutes"]
     LUNCH_START_STR = p["lunch_start_str"]
     LUNCH_END_STR = p["lunch_end_str"]
+    TIME_STOP_MINUTES = p.get("time_stop_minutes")
+    TIME_STOP_MIN_R = p.get("time_stop_min_r")
+    SQUARE_OFF_MINUTES = p.get("square_off_minutes")
+    REENTRY_COOLDOWN_SECONDS = p.get("reentry_cooldown_seconds", 0)
+    EXPIRY_DAY_CONF_BONUS = p.get("expiry_day_conf_bonus", 0)
+    EXPIRY_DAY_SIZE_FACTOR = p.get("expiry_day_size_factor", 1.0)
+    VWAP_USE_VOLUME = p.get("vwap_use_volume", False)
+    SIGNALS_LOG_INTERVAL_SECONDS = p.get("signals_log_interval_seconds", 60)
 
 
 def set_strategy_profile(name: str) -> dict:
@@ -880,14 +927,15 @@ def update_live_candle(ltp, volume=None, event_time=None):
 def get_indicator_series():
     with data_lock:
         closes = list(close_history); highs = list(high_history); lows = list(low_history)
-        volumes = list(volume_history)
+        volumes = list(volume_history); times = list(candle_time)
         c = dict(current_candle); hist_last = historical_last_minute; status = candle_status
 
     if (c.get("minute") is not None and c.get("close", 0) > 0 and hist_last is not None and
             c["minute"] == hist_last + 1 and status in ("CONTINUOUS", "LIVE CANDLE")):
         closes.append(c["close"]); highs.append(c["high"]); lows.append(c["low"])
         volumes.append(c.get("volume", 0))
-    return {"closes": closes, "highs": highs, "lows": lows, "volumes": volumes}
+        times.append(c.get("minute"))
+    return {"closes": closes, "highs": highs, "lows": lows, "volumes": volumes, "times": times}
 
 
 def parse_message(message):
@@ -1141,40 +1189,79 @@ def rest_loop():
 #  pure functions, which is what makes the core testable/backtestable)
 # ============================================================
 
-def compute_technical():
-    series = get_indicator_series()
+def compute_technical(s=None):
+    series = s or get_indicator_series()
     return core.technical_score(series["closes"], series["highs"], series["lows"],
                                  ema_fast=EMA_FAST, ema_slow=EMA_SLOW,
                                  rsi_length=RSI_LENGTH, atr_length=ATR_LENGTH,
                                  adx_length=ADX_LENGTH, min_adx=MIN_ADX_FOR_TREND_SIGNAL)
 
 
-def compute_momentum():
-    series = get_indicator_series()
+def compute_momentum(s=None):
+    series = s or get_indicator_series()
     return core.momentum_score(series["closes"], rsi_length=RSI_LENGTH)
 
 
-def compute_htf_trend(factor=None):
+def compute_htf_trend(factor=None, s=None):
     f = factor if factor is not None else HTF_FACTOR
-    series = get_indicator_series()
+    series = s or get_indicator_series()
     return core.higher_timeframe_trend(series["highs"], series["lows"], series["closes"],
                                         factor=f, ema_fast=EMA_FAST, ema_slow=EMA_SLOW)
+
+
+def compute_vwap(s=None):
+    series = s or get_indicator_series()
+    highs = series.get("highs", [])
+    lows = series.get("lows", [])
+    closes = series.get("closes", [])
+    volumes = series.get("volumes", [])
+    times = series.get("times", [])
+
+    if ACTIVE_STRATEGY_PROFILE == "SCALP":
+        # Session VWAP: filter down to candles whose IST calendar day equals today
+        today_date = get_ist_now().date()
+        ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        if times and len(times) == len(closes):
+            today_indices = []
+            for i, t in enumerate(times):
+                sec = candle_epoch_seconds(t)
+                if sec is not None:
+                    try:
+                        dt = datetime.datetime.fromtimestamp(sec, tz=ist_tz)
+                        if dt.date() == today_date:
+                            today_indices.append(i)
+                    except Exception:
+                        pass
+            if today_indices:
+                highs = [highs[i] for i in today_indices]
+                lows = [lows[i] for i in today_indices]
+                closes = [closes[i] for i in today_indices]
+                volumes = [volumes[i] for i in today_indices] if volumes else []
+        return core.calculate_session_vwap(highs, lows, closes, volumes, use_volume=bool(VWAP_USE_VOLUME))
+    else:
+        return core.calculate_vwap(highs, lows, closes, volumes)
 
 
 def compute_option_pressure():
     """
     Aggregates CE/PE totals across selected_strikes, then delegates the
     scoring math to core.option_pressure_score(). This is the ONE OI/price
-    delta tracker (option_prev_tick / option_session_baseline) -- V47.2
-    had two of these (an inline one and a separate "V31" one) and only
-    ever returned the second, leaving the first as dead code.
+    delta tracker (option_prev_tick / option_session_baseline).
     """
     ce_oi = pe_oi = ce_volume = pe_volume = 0
     ce_buy = pe_buy = ce_sell = pe_sell = 0
     ce_price_change = pe_price_change = 0.0
+    ce_oi_change = pe_oi_change = 0
     ce_ivs = []
     pe_ivs = []
     live_count = 0
+
+    today_str = today_string()
+
+    # Reset baseline if stored date != today
+    for k in list(option_session_baseline.keys()):
+        if option_session_baseline[k].get("date") != today_str:
+            del option_session_baseline[k]
 
     with data_lock:
         snapshot = [(item, live_data.get(item["key"], {}).copy()) for item in selected_strikes]
@@ -1197,20 +1284,35 @@ def compute_option_pressure():
         price_delta = (ltp - num(prev.get("ltp"))) if prev and ltp > 0 and num(prev.get("ltp")) > 0 else 0.0
 
         if key not in option_session_baseline and oi > 0:
-            option_session_baseline[key] = {"oi": oi, "volume": volume}
+            option_session_baseline[key] = {"oi": oi, "volume": volume, "date": today_str}
+
+        base_oi = option_session_baseline.get(key, {}).get("oi", oi)
+        oi_delta = oi - base_oi
 
         if typ == "CE":
             ce_oi += oi; ce_volume += volume; ce_buy += buy_qty; ce_sell += sell_qty
             ce_price_change += price_delta
+            ce_oi_change += oi_delta
         else:
             pe_oi += oi; pe_volume += volume; pe_buy += buy_qty; pe_sell += sell_qty
             pe_price_change += price_delta
+            pe_oi_change += oi_delta
 
         option_prev_tick[key] = {"ltp": ltp, "oi": oi, "volume": volume}
 
-    result = core.option_pressure_score(ce_oi, pe_oi, ce_volume, pe_volume,
-                                         ce_buy, pe_buy, ce_sell, pe_sell,
-                                         ce_price_change, pe_price_change)
+    if ACTIVE_STRATEGY_PROFILE == "SCALP":
+        result = core.option_pressure_score(
+            ce_oi, pe_oi, ce_volume, pe_volume,
+            ce_buy, pe_buy, ce_sell, pe_sell,
+            ce_price_change, pe_price_change,
+            ce_oi_change=ce_oi_change, pe_oi_change=pe_oi_change,
+        )
+    else:
+        result = core.option_pressure_score(
+            ce_oi, pe_oi, ce_volume, pe_volume,
+            ce_buy, pe_buy, ce_sell, pe_sell,
+            ce_price_change, pe_price_change,
+        )
     avg_ce_iv = (sum(ce_ivs) / len(ce_ivs)) if ce_ivs else 0.0
     avg_pe_iv = (sum(pe_ivs) / len(pe_ivs)) if pe_ivs else 0.0
     # Normalized IV skew (-100 to 100)
@@ -1258,13 +1360,14 @@ def live_signal_ready():
 
 def generate_signal(spot=None):
     global last_signal_audit
+    snapshot = get_indicator_series()
     ready, readiness_reason = live_signal_ready()
     if not ready:
-        tech = compute_technical()
-        mom = compute_momentum()
+        tech = compute_technical(s=snapshot)
+        mom = compute_momentum(s=snapshot)
         opts = compute_option_pressure()
-        htf = compute_htf_trend(factor=5)
-        htf_3m = compute_htf_trend(factor=3) if HTF_VETO_MODE == "both_tf" else "NEUTRAL"
+        htf = compute_htf_trend(factor=5, s=snapshot)
+        htf_3m = compute_htf_trend(factor=3, s=snapshot) if HTF_VETO_MODE == "both_tf" else "NEUTRAL"
         epm = core.epm_score(
             volume_score=opts.get("volume_score", 0.0),
             iv_skew=opts.get("iv_skew", 0.0),
@@ -1288,11 +1391,11 @@ def generate_signal(spot=None):
         log_signal_to_csv(result, spot)
         return result
 
-    technical = compute_technical()
-    momentum = compute_momentum()
+    technical = compute_technical(s=snapshot)
+    momentum = compute_momentum(s=snapshot)
     options = compute_option_pressure()
-    htf_trend = compute_htf_trend(factor=5)
-    htf_trend_3m = compute_htf_trend(factor=3) if HTF_VETO_MODE == "both_tf" else "NEUTRAL"
+    htf_trend = compute_htf_trend(factor=5, s=snapshot)
+    htf_trend_3m = compute_htf_trend(factor=3, s=snapshot) if HTF_VETO_MODE == "both_tf" else "NEUTRAL"
     epm = core.epm_score(
         volume_score=options.get("volume_score", 0.0),
         iv_skew=options.get("iv_skew", 0.0),
@@ -1339,9 +1442,8 @@ def generate_signal(spot=None):
 
     # VWAP-stretch filter (engaged if configured in active profile, e.g. SCALP)
     if VWAP_STRETCH_ATR is not None:
-        series = get_indicator_series()
-        vwap = core.calculate_vwap(series["highs"], series["lows"], series["closes"], series.get("volumes", []))
-        curr_spot = spot if (spot is not None and spot > 0) else (series["closes"][-1] if series["closes"] else 0.0)
+        vwap = compute_vwap(s=snapshot)
+        curr_spot = spot if (spot is not None and spot > 0) else (snapshot["closes"][-1] if snapshot.get("closes") else 0.0)
         atr = technical.get("atr")
         is_stretched, _ = core.check_vwap_stretch(curr_spot, vwap, atr, VWAP_STRETCH_ATR)
         if is_stretched:
@@ -1399,6 +1501,7 @@ def generate_signal(spot=None):
 
 def reset_daily_state_if_new_day():
     global daily_pnl, trades_today, consecutive_losses, cooldown_until, current_trade_date
+    global scalp_reentry_cooldown_until, scalp_last_closed_signal, scalp_reentry_armed
     today = today_string()
     if current_trade_date != today:
         current_trade_date = today
@@ -1406,6 +1509,9 @@ def reset_daily_state_if_new_day():
         trades_today = 0
         consecutive_losses = 0
         cooldown_until = None
+        scalp_reentry_cooldown_until = 0.0
+        scalp_last_closed_signal = None
+        scalp_reentry_armed = True
         safe_print("NEW TRADING DAY -- risk counters reset:", today)
 
 
@@ -1428,6 +1534,17 @@ SIGNAL_FIELDS = ["timestamp", "spot", "signal", "confidence", "reason",
 
 
 def log_signal_to_csv(result, spot):
+    global _last_logged_signal_key, _last_logged_signal_time
+    sig = result.get("signal")
+    reason = result.get("reason")
+    now = time.time()
+    current_key = (sig, reason)
+    interval = SIGNALS_LOG_INTERVAL_SECONDS if SIGNALS_LOG_INTERVAL_SECONDS is not None else 60
+    if current_key == _last_logged_signal_key and (now - _last_logged_signal_time) < interval:
+        return
+    _last_logged_signal_key = current_key
+    _last_logged_signal_time = now
+
     technical = result.get("technical", {}) or {}
     momentum = result.get("momentum", {}) or {}
     options = result.get("options", {}) or {}
@@ -1454,14 +1571,28 @@ def log_signal_to_csv(result, spot):
     _append_csv(SIGNALS_LOG_PATH, SIGNAL_FIELDS, row)
 
 
-TRADE_FIELDS = ["entry_time", "exit_time", "signal", "direction", "strike", "type", "lots",
-                 "entry", "exit", "sl", "target", "atr_used", "option_delta", "confidence",
-                 "iv_percentile_at_entry", "gross_pnl", "cost", "net_pnl", "exit_reason",
-                 "used_ltp_fallback_entry", "used_ltp_fallback_exit", "strategy_profile"]
+TRADE_FIELDS = [
+    "date", "entry_time", "exit_time", "signal", "direction", "strike", "type",
+    "entry", "exit", "sl_initial", "sl", "target", "lots",
+    "gross", "gross_pnl", "cost", "net", "net_pnl",
+    "reason", "exit_reason", "confidence", "iv_percentile_at_entry",
+    "held_seconds", "atr_used", "option_delta",
+    "used_ltp_fallback_entry", "used_ltp_fallback_exit", "strategy_profile"
+]
 
 
 def log_trade_to_csv(record):
     row = {k: record.get(k) for k in TRADE_FIELDS}
+    if not row.get("date"):
+        row["date"] = record.get("date") or today_string()
+    if row.get("gross") is None:
+        row["gross"] = record.get("gross_pnl")
+    if row.get("net") is None:
+        row["net"] = record.get("net_pnl")
+    if row.get("reason") is None:
+        row["reason"] = record.get("exit_reason")
+    if row.get("sl_initial") is None:
+        row["sl_initial"] = record.get("sl_initial") or record.get("sl")
     if not row.get("strategy_profile"):
         row["strategy_profile"] = record.get("strategy_profile", ACTIVE_STRATEGY_PROFILE)
     _append_csv(TRADES_LOG_PATH, TRADE_FIELDS, row)
@@ -1535,6 +1666,21 @@ def open_paper_trade(signal, confidence, spot, technical):
     if not allowed:
         return None, reason
 
+    # Scalp re-entry cooldown & anti-whipsaw checks
+    if ACTIVE_STRATEGY_PROFILE == "SCALP":
+        if time.time() < scalp_reentry_cooldown_until:
+            rem = int(scalp_reentry_cooldown_until - time.time())
+            return None, f"Re-entry cooldown active ({rem}s remaining)"
+        if not scalp_reentry_armed:
+            return None, f"Anti-whipsaw filter: signal must change away from {scalp_last_closed_signal} or WAIT before re-arming"
+
+    # Scalp expiry-day handling: requires confidence >= threshold + bonus
+    is_expiry_day = (selected_expiry is not None and str(selected_expiry).strip() == today_string())
+    if ACTIVE_STRATEGY_PROFILE == "SCALP" and is_expiry_day:
+        req_conf = CONFIDENCE_THRESHOLD + EXPIRY_DAY_CONF_BONUS
+        if confidence < req_conf:
+            return None, f"Expiry day confidence requirement not met ({confidence:.1f}% < {req_conf:.1f}% required)"
+
     option = select_trade_option(signal, spot)
     if option is None:
         return None, "No liquid option candidate found"
@@ -1574,18 +1720,27 @@ def open_paper_trade(signal, confidence, spot, technical):
         else:
             return None, "Position sizing returned 0 lots (risk budget too small for this stop distance)"
 
+    # Scalp expiry-day sizing: 50% lot size (min 1 lot)
+    if ACTIVE_STRATEGY_PROFILE == "SCALP" and is_expiry_day:
+        lots = max(1, int(lots * EXPIRY_DAY_SIZE_FACTOR))
+
     if REAL_ORDER:
         place_real_order(option, entry_price, lots)  # will raise -- see docstring
+
+    sl_distance = stop_target["sl_distance"]
+    risk = sl_distance
 
     paper_trade = {
         "signal": signal, "direction": "CALL" if signal == "BUY CALL" else "PUT",
         "strike": option["strike"], "type": option["type"], "key": option["key"],
         "entry": entry_price, "sl": sl, "target": target,
+        "sl_initial": sl, "risk": risk,
         "atr_used": stop_target["option_atr"], "option_delta": option_delta,
         "lots": lots, "highest": entry_price, "trail_active": False,
         "confidence": confidence, "iv_percentile_at_entry": iv_pct,
         "used_ltp_fallback_entry": used_ltp_fallback_entry,
         "entry_time": time.strftime("%H:%M:%S"),
+        "entry_timestamp": time.time(),
         "strategy_profile": ACTIVE_STRATEGY_PROFILE,
     }
     trades_today += 1
@@ -1604,6 +1759,7 @@ def open_paper_trade(signal, confidence, spot, technical):
 
 def close_paper_trade(exit_price, exit_reason, used_ltp_fallback_exit):
     global paper_trade, daily_pnl, consecutive_losses, cooldown_until
+    global scalp_reentry_cooldown_until, scalp_last_closed_signal, scalp_reentry_armed
 
     lots = paper_trade["lots"]
     gross_pnl = (exit_price - paper_trade["entry"]) * LOT_SIZE * lots
@@ -1627,11 +1783,22 @@ def close_paper_trade(exit_price, exit_reason, used_ltp_fallback_exit):
     paper_trade_stats["net_pnl"] += net_pnl
     paper_trade_stats["total_cost"] += cost
 
+    if ACTIVE_STRATEGY_PROFILE == "SCALP":
+        scalp_reentry_cooldown_until = time.time() + REENTRY_COOLDOWN_SECONDS
+        scalp_last_closed_signal = paper_trade.get("signal")
+        scalp_reentry_armed = False
+
+    held_seconds = max(0, int(time.time() - paper_trade.get("entry_timestamp", time.time())))
     record = dict(paper_trade)
     record.update({
-        "exit": exit_price, "exit_reason": exit_reason, "gross_pnl": gross_pnl,
-        "cost": cost, "net_pnl": net_pnl, "exit_time": time.strftime("%H:%M:%S"),
+        "date": today_string(),
+        "exit": exit_price, "exit_reason": exit_reason, "reason": exit_reason,
+        "gross": gross_pnl, "gross_pnl": gross_pnl,
+        "cost": cost, "net": net_pnl, "net_pnl": net_pnl,
+        "exit_time": time.strftime("%H:%M:%S"),
         "used_ltp_fallback_exit": used_ltp_fallback_exit,
+        "sl_initial": paper_trade.get("sl_initial", paper_trade.get("sl")),
+        "held_seconds": held_seconds,
     })
     paper_trades.append(record)
     log_trade_to_csv(record)
@@ -1670,21 +1837,32 @@ def paper_trade_engine(signal_data, spot, technical):
 
         entry = paper_trade["entry"]; sl = paper_trade["sl"]; target = paper_trade["target"]
         atr_used = paper_trade.get("atr_used", 8.0)
+        risk = paper_trade.get("risk", atr_used * ATR_SL_MULTIPLIER)
         highest = paper_trade.get("highest", entry)
         trail_active = paper_trade.get("trail_active", False)
+
+        # 1. SQUARE OFF: force-close Scalp position at/after 15:15 IST or if market closed
+        if ACTIVE_STRATEGY_PROFILE == "SCALP":
+            now_ist = get_ist_now()
+            current_ist_minutes = now_ist.hour * 60 + now_ist.minute
+            if (SQUARE_OFF_MINUTES is not None and current_ist_minutes >= SQUARE_OFF_MINUTES) or (not nse_market_open_now()):
+                close_paper_trade(exit_price_if_closing, "SQUARE OFF", used_ltp_fallback_exit)
+                return
 
         if mark_price > highest:
             paper_trade["highest"] = mark_price
             highest = mark_price
 
-        r_value = atr_used * ATR_SL_MULTIPLIER
+        # Trailing stop in R units
+        r_value = risk if ACTIVE_STRATEGY_PROFILE == "SCALP" else (atr_used * ATR_SL_MULTIPLIER)
         if not trail_active and (mark_price - entry) >= (r_value * TRAIL_ACTIVATE_R):
             paper_trade["trail_active"] = True
             trail_active = True
             safe_print("TRAILING ACTIVATED")
 
         if trail_active:
-            new_sl = highest - (atr_used * TRAIL_DISTANCE_R)
+            trail_dist = (risk * TRAIL_DISTANCE_R) if ACTIVE_STRATEGY_PROFILE == "SCALP" else (atr_used * TRAIL_DISTANCE_R)
+            new_sl = highest - trail_dist
             if new_sl > sl:
                 paper_trade["sl"] = new_sl
                 sl = new_sl
@@ -1695,9 +1873,25 @@ def paper_trade_engine(signal_data, spot, technical):
         elif mark_price >= target:
             exit_reason = "TARGET"
 
+        # 2. TIME STOP: Scalp position open >= TIME_STOP_MINUTES (12) and unrealized profit < TIME_STOP_MIN_R (0.3) * risk
+        if not exit_reason and ACTIVE_STRATEGY_PROFILE == "SCALP" and TIME_STOP_MINUTES is not None:
+            open_dur = time.time() - paper_trade.get("entry_timestamp", time.time())
+            unrealized_profit = mark_price - entry
+            min_r = TIME_STOP_MIN_R if TIME_STOP_MIN_R is not None else 0.3
+            if open_dur >= (TIME_STOP_MINUTES * 60) and unrealized_profit < (min_r * risk):
+                exit_reason = "TIME STOP"
+
         if exit_reason:
             close_paper_trade(exit_price_if_closing, exit_reason, used_ltp_fallback_exit)
         return
+
+    # When no paper trade is open:
+    # Anti-whipsaw arming for Scalp: re-arms when signal transitions away from last closed signal or to WAIT
+    global scalp_reentry_armed
+    if ACTIVE_STRATEGY_PROFILE == "SCALP" and not scalp_reentry_armed:
+        if signal == "WAIT" or (scalp_last_closed_signal and signal != scalp_last_closed_signal):
+            scalp_reentry_armed = True
+            safe_print(f"ANTI-WHIPSAW: Re-armed after signal switched to {signal}")
 
     if signal not in ("BUY CALL", "BUY PUT") or confidence < CONFIDENCE_THRESHOLD:
         return
@@ -1780,26 +1974,37 @@ def data_quality():
             "total_options": total, "option_quality": option_quality, "status": status}
 
 
+def load_intraday_data():
+    """
+    Pulls today's 1-min candles from Upstox's intraday historical endpoint.
+    """
+    return refresh_today_intraday_history()
+
+
+def refresh_history_if_gap(force=False):
+    """
+    Rate-limited historical refresh (15s cooldown) when a sequence gap is detected,
+    or once forced at Scalp engine startup / profile switch.
+    """
+    global LAST_INTRADAY_REFRESH_TIME
+    now = time.time()
+    if not force:
+        if now - LAST_INTRADAY_REFRESH_TIME < INTRADAY_REFRESH_COOLDOWN:
+            return False
+        with data_lock:
+            c = dict(current_candle)
+            hist_min = historical_last_minute
+        live_min = c.get("minute")
+        if live_min is None or hist_min is None or (int(live_min) - int(hist_min) <= 1):
+            return False
+
+    LAST_INTRADAY_REFRESH_TIME = now
+    safe_print(f"INTRADAY GAP REFRESH: {'forced' if force else 'gap detected'}")
+    return load_intraday_data()
+
+
 def maybe_refresh_history_for_live_gap():
-    global V36_LAST_HISTORY_REFRESH
-    try:
-        if current_candle is None or historical_last_minute is None:
-            return False
-        live_min = current_candle.get("minute")
-        if live_min is None:
-            return False
-        gap = int(live_min) - int(historical_last_minute)
-        if gap <= 1:
-            return False
-        now = time.time()
-        if now - V36_LAST_HISTORY_REFRESH < V36_REFRESH_COOLDOWN:
-            return False
-        V36_LAST_HISTORY_REFRESH = now
-        safe_print(f"HISTORY REFRESH: live/history gap = {gap} minute(s)")
-        return refresh_today_intraday_history()
-    except Exception as e:
-        log_exception("HISTORY REFRESH ERROR", e)
-        return False
+    return refresh_history_if_gap(force=False)
 
 
 def get_state_snapshot():
@@ -2018,7 +2223,7 @@ def display():
     safe_print("TRADE WINDOW       :", "YES" if is_trade_time() else "NO")
     safe_print("WS SUBSCRIBED      :", "YES" if ws_subscribed else "NO")
     safe_print("======================================================")
-    safe_print("V48 IMPROVED SEMI-ALGO (ADX + HTF + IV + RISK LAYER)")
+    safe_print(f"CHACHA ENGINE ({ACTIVE_STRATEGY_PROFILE} PROFILE)")
     safe_print("======================================================")
     safe_print("NIFTY             :", round(spot, 2), "| ATM:", last_atm_used)
     safe_print("WEBSOCKET         :", "CONNECTED" if ws_connected else "DISCONNECTED")
@@ -2223,7 +2428,7 @@ def stop_live_engine():
 
 def main():
     safe_print("\n==============================================")
-    safe_print("V48 IMPROVED SEMI-ALGO")
+    safe_print("CHACHA TRADING ENGINE")
     safe_print("ADX chop filter + 5-min HTF confirm + IV filter + risk layer")
     safe_print("==============================================")
     safe_print("REAL ORDER:", REAL_ORDER)
@@ -2252,7 +2457,7 @@ def main():
         while running:
             time.sleep(1)
     except KeyboardInterrupt:
-        safe_print("\nStopping V48...")
+        safe_print("\nStopping engine...")
         stop_live_engine()
 
 
