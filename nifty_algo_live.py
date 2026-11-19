@@ -52,6 +52,7 @@
 
 import csv
 import datetime
+import json
 import os
 import threading
 import time
@@ -129,6 +130,7 @@ STRATEGY_PROFILES = {
         "expiry_day_size_factor": 1.0,
         "vwap_use_volume": False,
         "signals_log_interval_seconds": 60,
+        "signal_confirm_ticks": 1,
     },
     "SCALP": {
         "name": "SCALP",
@@ -161,6 +163,7 @@ STRATEGY_PROFILES = {
         "expiry_day_size_factor": 0.5,
         "vwap_use_volume": False,
         "signals_log_interval_seconds": 60,
+        "signal_confirm_ticks": 3,
     },
 }
 
@@ -209,6 +212,10 @@ EXPIRY_DAY_CONF_BONUS = _init_profile["expiry_day_conf_bonus"]
 EXPIRY_DAY_SIZE_FACTOR = _init_profile["expiry_day_size_factor"]
 VWAP_USE_VOLUME = _init_profile["vwap_use_volume"]
 SIGNALS_LOG_INTERVAL_SECONDS = _init_profile["signals_log_interval_seconds"]
+SIGNAL_CONFIRM_TICKS = _init_profile.get("signal_confirm_ticks", 1)
+
+signal_streak = 0
+last_seen_signal = None
 
 scalp_reentry_cooldown_until = 0.0
 scalp_last_closed_signal = None
@@ -238,8 +245,16 @@ REBALANCE_THRESHOLD_POINTS = 150
 REBALANCE_CHECK_SECONDS = 30
 
 # --- Persistence --------------------------------------------------
-SIGNALS_LOG_PATH = "signals_log.csv"
-TRADES_LOG_PATH = "trades_log.csv"
+DATA_DIR = os.environ.get("DATA_DIR", "")
+if DATA_DIR:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    SIGNALS_LOG_PATH = os.path.join(DATA_DIR, "signals_log.csv")
+    TRADES_LOG_PATH = os.path.join(DATA_DIR, "trades_log.csv")
+    OPEN_TRADE_PATH = os.path.join(DATA_DIR, "open_trade.json")
+else:
+    SIGNALS_LOG_PATH = "signals_log.csv"
+    TRADES_LOG_PATH = "trades_log.csv"
+    OPEN_TRADE_PATH = "open_trade.json"
 
 HEADERS = {
     "Authorization": "Bearer " + ACCESS_TOKEN,
@@ -292,7 +307,8 @@ def _apply_strategy_profile(name: str):
     global LUNCH_START_MINUTES, LUNCH_END_MINUTES, LUNCH_START_STR, LUNCH_END_STR
     global TIME_STOP_MINUTES, TIME_STOP_MIN_R, SQUARE_OFF_MINUTES
     global REENTRY_COOLDOWN_SECONDS, EXPIRY_DAY_CONF_BONUS, EXPIRY_DAY_SIZE_FACTOR
-    global VWAP_USE_VOLUME, SIGNALS_LOG_INTERVAL_SECONDS
+    global VWAP_USE_VOLUME, SIGNALS_LOG_INTERVAL_SECONDS, SIGNAL_CONFIRM_TICKS
+    global signal_streak, last_seen_signal
 
     p = STRATEGY_PROFILES[name]
     ACTIVE_STRATEGY_PROFILE = name
@@ -323,6 +339,9 @@ def _apply_strategy_profile(name: str):
     EXPIRY_DAY_SIZE_FACTOR = p.get("expiry_day_size_factor", 1.0)
     VWAP_USE_VOLUME = p.get("vwap_use_volume", False)
     SIGNALS_LOG_INTERVAL_SECONDS = p.get("signals_log_interval_seconds", 60)
+    SIGNAL_CONFIRM_TICKS = p.get("signal_confirm_ticks", 1)
+    signal_streak = 0
+    last_seen_signal = None
 
 
 def set_strategy_profile(name: str) -> dict:
@@ -556,6 +575,26 @@ def get_ist_now():
 
 def today_string():
     return get_ist_now().strftime("%Y-%m-%d")
+
+
+def ist_minutes_now():
+    now_ist = get_ist_now()
+    return now_ist.hour * 60 + now_ist.minute
+
+
+def candle_day(value):
+    sec = candle_epoch_seconds(value)
+    if sec is None:
+        return None
+    ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    try:
+        return datetime.datetime.fromtimestamp(sec, tz=ist_tz).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def is_scalping_time():
+    return is_trade_time()
 
 
 def timestamp_minute(ts=None):
@@ -1219,19 +1258,12 @@ def compute_vwap(s=None):
 
     if ACTIVE_STRATEGY_PROFILE == "SCALP":
         # Session VWAP: filter down to candles whose IST calendar day equals today
-        today_date = get_ist_now().date()
-        ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        today_date = today_string()
         if times and len(times) == len(closes):
             today_indices = []
             for i, t in enumerate(times):
-                sec = candle_epoch_seconds(t)
-                if sec is not None:
-                    try:
-                        dt = datetime.datetime.fromtimestamp(sec, tz=ist_tz)
-                        if dt.date() == today_date:
-                            today_indices.append(i)
-                    except Exception:
-                        pass
+                if candle_day(t) == today_date:
+                    today_indices.append(i)
             if today_indices:
                 highs = [highs[i] for i in today_indices]
                 lows = [lows[i] for i in today_indices]
@@ -1598,6 +1630,200 @@ def log_trade_to_csv(record):
     _append_csv(TRADES_LOG_PATH, TRADE_FIELDS, row)
 
 
+def save_open_trade(trade=None):
+    """
+    Atomically saves open paper trade state to OPEN_TRADE_PATH using a temporary file
+    and os.replace to prevent corrupt JSON on mid-write crashes.
+    """
+    global paper_trade
+    t = trade if trade is not None else paper_trade
+    if t is None:
+        clear_open_trade()
+        return
+    try:
+        dir_name = os.path.dirname(os.path.abspath(OPEN_TRADE_PATH))
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        temp_path = os.path.join(dir_name or ".", f".open_trade_{os.getpid()}_{time.time()}.tmp")
+        data_str = json.dumps(t, indent=2)
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(data_str)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, OPEN_TRADE_PATH)
+    except Exception as e:
+        safe_print(f"ERROR saving open trade to {OPEN_TRADE_PATH}: {e}")
+
+
+def clear_open_trade():
+    """
+    Removes open_trade.json when position is closed.
+    """
+    try:
+        if os.path.exists(OPEN_TRADE_PATH):
+            os.remove(OPEN_TRADE_PATH)
+    except Exception as e:
+        safe_print(f"ERROR clearing open trade file: {e}")
+
+
+def _finalize_stale_trade(stale_trade):
+    """
+    Force-closes a position left open from a PRIOR calendar day at its last known mark price,
+    tagged reason 'STALE RESTART', without modifying today's counters.
+    """
+    try:
+        entry = num(stale_trade.get("entry", 0.0))
+        highest = num(stale_trade.get("highest", entry))
+        exit_price = highest if highest > 0 else entry
+        lots = int(stale_trade.get("lots", 1))
+        gross_pnl = (exit_price - entry) * LOT_SIZE * lots
+        cost, _ = core.estimate_option_trade_cost(entry, exit_price, LOT_SIZE, lots)
+        net_pnl = gross_pnl - cost
+        held_seconds = max(0, int(time.time() - num(stale_trade.get("entry_timestamp", time.time()))))
+
+        record = dict(stale_trade)
+        record.update({
+            "date": stale_trade.get("date", today_string()),
+            "exit": exit_price,
+            "exit_reason": "STALE RESTART",
+            "reason": "STALE RESTART",
+            "gross": gross_pnl,
+            "gross_pnl": gross_pnl,
+            "cost": cost,
+            "net": net_pnl,
+            "net_pnl": net_pnl,
+            "exit_time": "15:30:00",
+            "used_ltp_fallback_exit": True,
+            "sl_initial": stale_trade.get("sl_initial", stale_trade.get("sl")),
+            "held_seconds": held_seconds,
+        })
+        log_trade_to_csv(record)
+        paper_trades.append(record)
+        clear_open_trade()
+        safe_print(f"CRASH RECOVERY: Finalized stale prior-day trade ({stale_trade.get('strike')} {stale_trade.get('type')}) as STALE RESTART")
+    except Exception as e:
+        safe_print(f"ERROR finalizing stale trade: {e}")
+
+
+def restore_open_trade():
+    """
+    Restores open_trade.json on startup if present.
+    Ensures idempotency against mid-close crash duplication (Part B #5):
+    if trades_log.csv for today already contains a matching closed trade
+    (same date + entry_time + strike + type + signal), the JSON is treated as stale,
+    cleared, and paper_trade stays None.
+    Also handles missing 'risk' field with safe fallback (Part B #6).
+    """
+    global paper_trade
+    if not os.path.exists(OPEN_TRADE_PATH):
+        return None
+
+    try:
+        with open(OPEN_TRADE_PATH, "r", encoding="utf-8") as f:
+            trade = json.load(f)
+    except Exception as e:
+        safe_print(f"CRASH RECOVERY: Corrupt open_trade.json ({e}). Clearing.")
+        clear_open_trade()
+        return None
+
+    if not isinstance(trade, dict) or "strike" not in trade:
+        clear_open_trade()
+        return None
+
+    # Safe fallback for missing 'risk' (Part B #6)
+    if trade.get("risk") is None or num(trade.get("risk")) <= 0:
+        atr_used = num(trade.get("atr_used", 8.0))
+        prof = trade.get("strategy_profile", ACTIVE_STRATEGY_PROFILE)
+        mult = ATR_SL_MULTIPLIER if prof == ACTIVE_STRATEGY_PROFILE else (1.0 if prof == "SCALP" else 1.2)
+        trade["risk"] = atr_used * mult
+
+    # Check calendar day: if left from prior day, force close as STALE RESTART without touching today's counters
+    trade_date = trade.get("date")
+    if not trade_date:
+        entry_ts = trade.get("entry_timestamp")
+        if entry_ts:
+            trade_date = candle_day(entry_ts) or today_string()
+        else:
+            trade_date = today_string()
+        trade["date"] = trade_date
+
+    if trade_date < today_string():
+        _finalize_stale_trade(trade)
+        paper_trade = None
+        return None
+
+    # Idempotency check against today's trades_log.csv (Part B #5)
+    if os.path.exists(TRADES_LOG_PATH):
+        try:
+            with open(TRADES_LOG_PATH, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if (row.get("date") == trade.get("date") and
+                        row.get("entry_time") == trade.get("entry_time") and
+                        str(row.get("strike")) == str(trade.get("strike")) and
+                        str(row.get("type")) == str(trade.get("type")) and
+                        str(row.get("signal")) == str(trade.get("signal"))):
+                        safe_print("CRASH RECOVERY: Found matching closed trade in trades_log.csv; open_trade.json is stale after crash. Clearing.")
+                        clear_open_trade()
+                        paper_trade = None
+                        return None
+        except Exception as e:
+            safe_print(f"WARNING: Error checking trades_log.csv for duplicates: {e}")
+
+    paper_trade = trade
+    safe_print(f"CRASH RECOVERY: Restored open {trade.get('signal')} position ({trade.get('strike')} {trade.get('type')})")
+    return paper_trade
+
+
+def restore_today_state():
+    """
+    Rebuilds all-time statistics, today's P&L, trade count, and loss streak from trades_log.csv on startup.
+    Then restores any in-flight open position via restore_open_trade().
+    """
+    global daily_pnl, trades_today, consecutive_losses, current_trading_day
+    current_trading_day = today_string()
+    today_pnl = 0.0
+    today_trades = 0
+    today_losses = 0
+
+    if os.path.exists(TRADES_LOG_PATH):
+        try:
+            with open(TRADES_LOG_PATH, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    net = num(row.get("net", row.get("net_pnl", 0.0)))
+                    gross = num(row.get("gross", row.get("gross_pnl", 0.0)))
+                    cost = num(row.get("cost", 0.0))
+
+                    paper_trade_stats["closed"] += 1
+                    paper_trade_stats["gross_pnl"] += gross
+                    paper_trade_stats["net_pnl"] += net
+                    paper_trade_stats["total_cost"] += cost
+                    if net > 0:
+                        paper_trade_stats["wins"] += 1
+                    else:
+                        paper_trade_stats["losses"] += 1
+
+                    row_date = row.get("date", "")
+                    if row_date == current_trading_day:
+                        today_pnl += net
+                        today_trades += 1
+                        if net > 0:
+                            today_losses = 0
+                        else:
+                            today_losses += 1
+        except Exception as e:
+            safe_print(f"WARNING: Error restoring state from {TRADES_LOG_PATH}: {e}")
+
+    daily_pnl = today_pnl
+    trades_today = today_trades
+    consecutive_losses = today_losses
+
+    restored = restore_open_trade()
+    if restored is not None:
+        trades_today += 1
+
+
 # ============================================================
 # PAPER TRADE ENGINE
 # ============================================================
@@ -1742,8 +1968,10 @@ def open_paper_trade(signal, confidence, spot, technical):
         "entry_time": time.strftime("%H:%M:%S"),
         "entry_timestamp": time.time(),
         "strategy_profile": ACTIVE_STRATEGY_PROFILE,
+        "date": today_string(),
     }
     trades_today += 1
+    save_open_trade(paper_trade)
 
     safe_print("\n======================================")
     safe_print("PAPER TRADE OPENED")
@@ -1802,6 +2030,7 @@ def close_paper_trade(exit_price, exit_reason, used_ltp_fallback_exit):
     })
     paper_trades.append(record)
     log_trade_to_csv(record)
+    clear_open_trade()
 
     safe_print("\n======================================")
     safe_print("PAPER TRADE CLOSED:", exit_reason)
@@ -1830,18 +2059,12 @@ def paper_trade_engine(signal_data, spot, technical):
 
         bid = num(data.get("bid")); ltp = num(data.get("ltp"))
         mark_price = ltp
-        exit_price_if_closing = bid if bid > 0 else ltp
+        fallback_price = bid if bid > 0 else (ltp if ltp > 0 else (paper_trade.get("highest") or paper_trade.get("entry", 0.0)))
+        exit_price_if_closing = fallback_price
         used_ltp_fallback_exit = bid <= 0
-        if mark_price <= 0:
-            return
-
-        entry = paper_trade["entry"]; sl = paper_trade["sl"]; target = paper_trade["target"]
-        atr_used = paper_trade.get("atr_used", 8.0)
-        risk = paper_trade.get("risk", atr_used * ATR_SL_MULTIPLIER)
-        highest = paper_trade.get("highest", entry)
-        trail_active = paper_trade.get("trail_active", False)
 
         # 1. SQUARE OFF: force-close Scalp position at/after 15:15 IST or if market closed
+        # Note: Checked BEFORE the mark_price <= 0 guard so dead/stale feeds after hours still trigger square-off
         if ACTIVE_STRATEGY_PROFILE == "SCALP":
             now_ist = get_ist_now()
             current_ist_minutes = now_ist.hour * 60 + now_ist.minute
@@ -1849,15 +2072,30 @@ def paper_trade_engine(signal_data, spot, technical):
                 close_paper_trade(exit_price_if_closing, "SQUARE OFF", used_ltp_fallback_exit)
                 return
 
+        if mark_price <= 0:
+            return
+
+        entry = paper_trade["entry"]; sl = paper_trade["sl"]; target = paper_trade["target"]
+        atr_used = paper_trade.get("atr_used", 8.0)
+        risk = paper_trade.get("risk")
+        if risk is None or risk <= 0:
+            risk = atr_used * (ATR_SL_MULTIPLIER if ACTIVE_STRATEGY_PROFILE == "SCALP" else 1.2)
+            paper_trade["risk"] = risk
+        highest = paper_trade.get("highest", entry)
+        trail_active = paper_trade.get("trail_active", False)
+
+        trade_updated = False
         if mark_price > highest:
             paper_trade["highest"] = mark_price
             highest = mark_price
+            trade_updated = True
 
         # Trailing stop in R units
         r_value = risk if ACTIVE_STRATEGY_PROFILE == "SCALP" else (atr_used * ATR_SL_MULTIPLIER)
         if not trail_active and (mark_price - entry) >= (r_value * TRAIL_ACTIVATE_R):
             paper_trade["trail_active"] = True
             trail_active = True
+            trade_updated = True
             safe_print("TRAILING ACTIVATED")
 
         if trail_active:
@@ -1866,6 +2104,10 @@ def paper_trade_engine(signal_data, spot, technical):
             if new_sl > sl:
                 paper_trade["sl"] = new_sl
                 sl = new_sl
+                trade_updated = True
+
+        if trade_updated:
+            save_open_trade(paper_trade)
 
         exit_reason = None
         if mark_price <= sl:
@@ -1887,18 +2129,32 @@ def paper_trade_engine(signal_data, spot, technical):
 
     # When no paper trade is open:
     # Anti-whipsaw arming for Scalp: re-arms when signal transitions away from last closed signal or to WAIT
-    global scalp_reentry_armed
+    global scalp_reentry_armed, signal_streak, last_seen_signal
     if ACTIVE_STRATEGY_PROFILE == "SCALP" and not scalp_reentry_armed:
         if signal == "WAIT" or (scalp_last_closed_signal and signal != scalp_last_closed_signal):
             scalp_reentry_armed = True
             safe_print(f"ANTI-WHIPSAW: Re-armed after signal switched to {signal}")
 
+    # Track signal streak for confirmation gate (Part D #7)
+    if signal == last_seen_signal:
+        signal_streak += 1
+    else:
+        last_seen_signal = signal
+        signal_streak = 1 if signal in ("BUY CALL", "BUY PUT") else 0
+
     if signal not in ("BUY CALL", "BUY PUT") or confidence < CONFIDENCE_THRESHOLD:
+        return
+
+    if ACTIVE_STRATEGY_PROFILE == "SCALP" and signal_streak < SIGNAL_CONFIRM_TICKS:
+        safe_print(f"SIGNAL SEEN BUT NOT TAKEN: Awaiting signal confirmation ({signal_streak}/{SIGNAL_CONFIRM_TICKS} ticks)")
         return
 
     _, reason = open_paper_trade(signal, confidence, spot, technical)
     if reason != "OPENED":
         safe_print("SIGNAL SEEN BUT NOT TAKEN:", reason)
+
+
+manage_open_trade = paper_trade_engine
 
 
 # ============================================================
@@ -2361,6 +2617,12 @@ def start_live_engine(token=None, force_restart=False):
             refresh_today_intraday_history()
         except Exception as e:
             log_exception("START ENGINE HISTORY ERROR", e)
+
+        # 4b. Restore state and open trade from persistent logs
+        try:
+            restore_today_state()
+        except Exception as e:
+            log_exception("START ENGINE RESTORE STATE ERROR", e)
 
         # 5. Initialize Upstox WebSocket Streamer if upstox_client is available
         try:

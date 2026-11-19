@@ -102,6 +102,24 @@ ops_bearish = core.option_pressure_score(
 print("    option_pressure_score (PE-dominant buying):", round(ops_bearish["score"], 2), ops_bearish["bias"])
 check("option_pressure negative and bearish when PE buying dominant", ops_bearish["score"] < 0 and ops_bearish["bias"] == "BEARISH")
 
+# Isolated regression test: verify order_score sign without OI/volume/price interference
+# (CE buy dominant MUST be bullish, PE buy dominant MUST be bearish)
+ops_isolated_ce = core.option_pressure_score(
+    ce_oi=100000, pe_oi=100000, ce_volume=10000, pe_volume=10000,
+    ce_buy=5000, pe_buy=0, ce_sell=0, pe_sell=0,
+    ce_price_change=0, pe_price_change=0,
+)
+check("order_score isolated sign: CE buying is positive/BULLISH",
+      ops_isolated_ce["score"] > 0 and ops_isolated_ce["bias"] == "BULLISH")
+
+ops_isolated_pe = core.option_pressure_score(
+    ce_oi=100000, pe_oi=100000, ce_volume=10000, pe_volume=10000,
+    ce_buy=0, pe_buy=5000, ce_sell=0, pe_sell=0,
+    ce_price_change=0, pe_price_change=0,
+)
+check("order_score isolated sign: PE buying is negative/BEARISH",
+      ops_isolated_pe["score"] < 0 and ops_isolated_pe["bias"] == "BEARISH")
+
 ops = ops_bullish
 
 # ---------------------------------------------------------------
@@ -288,6 +306,63 @@ sd_scalp_both = core.signal_decision(
 check("Scalp profile blocks BUY CALL when BOTH 3m and 5m are BEARISH",
       sd_scalp_both["signal"] == "WAIT" and "both higher-timeframe" in sd_scalp_both["reason"])
 print("    Scalp dual-HTF veto reason:", sd_scalp_both["reason"])
+
+# Case 2b: BUY CALL when 5m is BULLISH but 3m is BEARISH (only one opposes -> ALLOWED)
+sd_scalp_call_allowed = core.signal_decision(
+    ts, ms, ops,
+    confidence_threshold=70,
+    min_adx_for_trend_signal=16,
+    require_htf_agreement=True,
+    htf_trend="BULLISH",
+    htf_trend_3m="BEARISH",
+    htf_veto_mode="both_tf",
+)
+check("Scalp allows BUY CALL when 5m is BULLISH and 3m is BEARISH (only one opposes)",
+      sd_scalp_call_allowed["signal"] == "BUY CALL")
+
+# Case 2c: BUY PUT dual-HTF scenarios
+ts_bear = {"trend": "BEARISH", "trend_strength": "STRONG", "score": -60.0, "ready": True, "adx": 25.0}
+ms_bear = {"score": -60.0}
+ops_bear = {"score": -60.0, "bias": "BEARISH"}
+
+# BUY PUT allowed when 5m is BULLISH but 3m is BEARISH (only one opposes)
+sd_scalp_put_allowed1 = core.signal_decision(
+    ts_bear, ms_bear, ops_bear,
+    confidence_threshold=70,
+    min_adx_for_trend_signal=16,
+    require_htf_agreement=True,
+    htf_trend="BULLISH",
+    htf_trend_3m="BEARISH",
+    htf_veto_mode="both_tf",
+)
+check("Scalp allows BUY PUT when 5m is BULLISH but 3m is BEARISH (only one opposes)",
+      sd_scalp_put_allowed1["signal"] == "BUY PUT")
+
+# BUY PUT allowed when 5m is BEARISH but 3m is BULLISH (only one opposes)
+sd_scalp_put_allowed2 = core.signal_decision(
+    ts_bear, ms_bear, ops_bear,
+    confidence_threshold=70,
+    min_adx_for_trend_signal=16,
+    require_htf_agreement=True,
+    htf_trend="BEARISH",
+    htf_trend_3m="BULLISH",
+    htf_veto_mode="both_tf",
+)
+check("Scalp allows BUY PUT when 5m is BEARISH but 3m is BULLISH (only one opposes)",
+      sd_scalp_put_allowed2["signal"] == "BUY PUT")
+
+# BUY PUT blocked when BOTH 5m and 3m are BULLISH
+sd_scalp_put_blocked = core.signal_decision(
+    ts_bear, ms_bear, ops_bear,
+    confidence_threshold=70,
+    min_adx_for_trend_signal=16,
+    require_htf_agreement=True,
+    htf_trend="BULLISH",
+    htf_trend_3m="BULLISH",
+    htf_veto_mode="both_tf",
+)
+check("Scalp blocks BUY PUT when BOTH 3m and 5m are BULLISH",
+      sd_scalp_put_blocked["signal"] == "WAIT" and "both higher-timeframe" in sd_scalp_put_blocked["reason"])
 
 # Case 3: 3-min higher_timeframe_trend check
 htf_3m = core.higher_timeframe_trend(htf_trend_high, htf_trend_low, htf_trend_close, factor=3)

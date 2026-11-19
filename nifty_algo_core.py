@@ -664,6 +664,9 @@ def delta_adjusted_option_stop_target(spot_atr, option_delta, sl_multiplier=1.2,
 # stamp-duty rates change periodically and vary by broker plan. Verify
 # current figures from your Upstox contract note / tariff sheet before
 # using this for anything beyond rough paper-P&L realism.
+# NOTE ON APRIL 2026 RATES: Recent NSE revisions/regulatory schedules
+# cite exchange_txn_pct: 0.0003553 and stt_sell_pct: 0.0015. Always check
+# your latest Upstox contract note / NSE circular before updating production rates.
 DEFAULT_COST_MODEL = {
     "brokerage_per_order": 20.0,     # flat Rs per executed order (verify)
     "exchange_txn_pct": 0.00053,     # NSE F&O txn charge on premium turnover (verify)

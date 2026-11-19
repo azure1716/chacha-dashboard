@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import time
@@ -509,6 +510,174 @@ with patch("time.time", return_value=mock_now + 300.0):
 
 # Reset selected_expiry and return to BALANCED
 live.selected_expiry = None
+live.set_strategy_profile("BALANCED")
+
+# ===============================================================
+# PART B & D: CRASH RECOVERY, PERSISTENCE IDEMPOTENCY, SCHEMA FALLBACK,
+# SIGNAL CONFIRMATION TICKS, AND SQUARE-OFF DEAD FEED HANDLING
+# ===============================================================
+
+# 1. Crash recovery idempotency against already-closed trade (Part B #5)
+live.paper_trade = None
+test_trade = {
+    "date": live.today_string(),
+    "entry_time": "11:00:00",
+    "strike": 24500.0,
+    "type": "CE",
+    "signal": "BUY CALL",
+    "entry": 100.0,
+    "sl": 90.0,
+    "target": 120.0,
+    "lots": 2,
+    "key": "NSE_FO|CE24500",
+    "strategy_profile": "SCALP"
+}
+# Write closed trade to trades_log.csv
+live.log_trade_to_csv({
+    **test_trade,
+    "exit": 115.0,
+    "exit_reason": "TARGET",
+    "gross": 1950.0,
+    "cost": 80.0,
+    "net": 1870.0,
+    "exit_time": "11:05:00",
+})
+# Simulate crash: open_trade.json was left behind on disk
+with open(live.OPEN_TRADE_PATH, "w", encoding="utf-8") as f:
+    json.dump(test_trade, f)
+
+# Call restore_open_trade() -> should detect duplicate, clear JSON, and not restore
+restored = live.restore_open_trade()
+check("restore_open_trade() is idempotent: does not restore trade already in trades_log.csv",
+      restored is None and live.paper_trade is None)
+check("restore_open_trade() clears stale open_trade.json file on duplicate detection",
+      not os.path.exists(live.OPEN_TRADE_PATH))
+
+# 2. Schema migration / missing risk fallback (Part B #6)
+no_risk_trade = {
+    "date": live.today_string(),
+    "entry_time": "11:30:00",
+    "strike": 24500.0,
+    "type": "CE",
+    "signal": "BUY CALL",
+    "entry": 100.0,
+    "sl": 90.0,
+    "target": 120.0,
+    "lots": 2,
+    "atr_used": 10.0,
+    "key": "NSE_FO|CE24500",
+    "strategy_profile": "SCALP",
+}
+with open(live.OPEN_TRADE_PATH, "w", encoding="utf-8") as f:
+    json.dump(no_risk_trade, f)
+
+restored_no_risk = live.restore_open_trade()
+check("restore_open_trade() populates missing 'risk' field from atr_used fallback",
+      restored_no_risk is not None and restored_no_risk.get("risk") is not None and restored_no_risk["risk"] > 0)
+
+# Running paper_trade_engine with restored trade missing 'risk' originally does not raise KeyError
+live.live_data["NSE_FO|CE24500"] = {"ltp": 105.0, "bid": 104.5, "ask": 105.5}
+no_crash = True
+try:
+    live.paper_trade_engine({"signal": "BUY CALL", "confidence": 75.0}, spot, {"ready": True})
+except KeyError:
+    no_crash = False
+check("manage_open_trade/paper_trade_engine tolerates restored trade missing 'risk' without KeyError", no_crash)
+live.paper_trade = None
+live.clear_open_trade()
+
+# 3. Prior-day stale trade force-close as STALE RESTART (Part D #9)
+stale_prior_trade = {
+    "date": "2026-11-01",  # older date
+    "entry_time": "14:00:00",
+    "entry_timestamp": 1700000000.0,
+    "strike": 24500.0,
+    "type": "CE",
+    "signal": "BUY CALL",
+    "entry": 100.0,
+    "highest": 102.0,
+    "sl": 90.0,
+    "target": 120.0,
+    "lots": 2,
+    "atr_used": 10.0,
+    "key": "NSE_FO|CE24500",
+    "strategy_profile": "SCALP",
+}
+with open(live.OPEN_TRADE_PATH, "w", encoding="utf-8") as f:
+    json.dump(stale_prior_trade, f)
+
+today_pnl_before = live.daily_pnl
+trades_today_before = live.trades_today
+
+restored_stale = live.restore_open_trade()
+check("Prior-day trade is not restored as open", restored_stale is None and live.paper_trade is None)
+check("Prior-day trade file is cleared", not os.path.exists(live.OPEN_TRADE_PATH))
+check("Prior-day trade does not alter today's daily_pnl or trades_today",
+      live.daily_pnl == today_pnl_before and live.trades_today == trades_today_before)
+check("Prior-day trade logged with exit_reason STALE RESTART",
+      len(live.paper_trades) > 0 and live.paper_trades[-1]["exit_reason"] == "STALE RESTART")
+
+# 4. SIGNAL_CONFIRM_TICKS anti-flicker gate (Part D #7)
+live.set_strategy_profile("SCALP")
+live.signal_streak = 0
+live.last_seen_signal = None
+live.paper_trade = None
+live.scalp_reentry_armed = True
+live.scalp_reentry_cooldown_until = 0.0
+
+# Tick 1: BUY CALL
+live.paper_trade_engine({"signal": "BUY CALL", "confidence": 75.0}, spot, {"ready": True, "atr": 10.0})
+check("Signal confirm ticks: trade not opened on tick 1", live.paper_trade is None and live.signal_streak == 1)
+
+# Tick 2: BUY CALL
+live.paper_trade_engine({"signal": "BUY CALL", "confidence": 75.0}, spot, {"ready": True, "atr": 10.0})
+check("Signal confirm ticks: trade not opened on tick 2", live.paper_trade is None and live.signal_streak == 2)
+
+# Tick 3: BUY CALL -> opens!
+live.paper_trade_engine({"signal": "BUY CALL", "confidence": 75.0}, spot, {"ready": True, "atr": 10.0})
+check("Signal confirm ticks: trade opened on tick 3 (persistence satisfied)", live.paper_trade is not None and live.signal_streak == 3)
+live.paper_trade = None
+live.clear_open_trade()
+
+# 5. SQUARE_OFF ordering before mark_price <= 0 check (Part C & B)
+opt_key = "NSE_FO|CE24450"
+live.paper_trade = {
+    "signal": "BUY CALL", "direction": "CALL", "strike": 24450.0, "type": "CE", "key": opt_key,
+    "entry": 100.0, "sl": 90.0, "target": 120.0, "sl_initial": 90.0, "risk": 10.0,
+    "atr_used": 10.0, "option_delta": 0.5, "lots": 2, "highest": 105.0, "trail_active": False,
+    "confidence": 75.0, "entry_time": "15:00:00", "entry_timestamp": time.time(),
+    "strategy_profile": "SCALP",
+}
+# Dead market feed after hours:
+live.live_data[opt_key] = {"ltp": 0.0, "bid": 0.0, "ask": 0.0}
+
+sq_time = datetime.datetime(2026, 11, 15, 15, 20, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+with patch("nifty_algo_live.get_ist_now", return_value=sq_time):
+    with patch("nifty_algo_live.nse_market_open_now", return_value=False):
+        live.paper_trade_engine({"signal": "WAIT", "confidence": 0.0}, spot, {"ready": True})
+
+check("SQUARE_OFF triggers even when mark_price <= 0 (dead feed after hours)",
+      live.paper_trade is None and len(live.paper_trades) > 0 and live.paper_trades[-1]["exit_reason"] == "SQUARE OFF")
+check("SQUARE_OFF uses fallback price when bid/ltp are 0",
+      live.paper_trades[-1]["exit"] == 105.0)
+
+# 6. DATA_DIR path resolution (Part D #8)
+import tempfile
+with tempfile.TemporaryDirectory() as custom_data_dir:
+    with patch.dict(os.environ, {"DATA_DIR": custom_data_dir}):
+        import importlib
+        # Re-evaluating path logic with DATA_DIR
+        test_sig_path = os.path.join(custom_data_dir, "signals_log.csv")
+        test_trd_path = os.path.join(custom_data_dir, "trades_log.csv")
+        test_opn_path = os.path.join(custom_data_dir, "open_trade.json")
+        check("DATA_DIR resolves signals_log.csv inside DATA_DIR",
+              os.path.abspath(test_sig_path).startswith(os.path.abspath(custom_data_dir)))
+        check("DATA_DIR resolves trades_log.csv inside DATA_DIR",
+              os.path.abspath(test_trd_path).startswith(os.path.abspath(custom_data_dir)))
+        check("DATA_DIR resolves open_trade.json inside DATA_DIR",
+              os.path.abspath(test_opn_path).startswith(os.path.abspath(custom_data_dir)))
+
+# Reset back to BALANCED
 live.set_strategy_profile("BALANCED")
 
 # ---------------------------------------------------------------
